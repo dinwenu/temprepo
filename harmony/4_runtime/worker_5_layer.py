@@ -80,8 +80,6 @@ class Worker(object): # each rank process
         self.pcm = PrintCPUMem()
         # Set up GPU
         torch.cuda.set_device(self.rank)
-
-        self.pcm.print("rank%d:----------------------------- 创建数据集之前" % self.rank)
         
         # initialize dataset (must be local to be pinned)
         if args.synthetic_data:
@@ -91,7 +89,6 @@ class Worker(object): # each rank process
             # self.bnames：{"is_data" = [True, False]， "name" = ["input0", "labels"]}
             self.data_loader, _, self.is_skip_minibatch, self.preprocess_minibatch, self.bnames, self.fdim, self.is_copy_minibatch = real_dataset(args, CONFIGS["D"], args.data_workers)
             self.data_ubatches, self.target_ubatches = None, None
-        self.pcm.print("rank%d:----------------------------- 创建数据集之后" % self.rank)
 
         from task_data_struct import filter_tasks_by_attr_val
         bwd_tasks = filter_tasks_by_attr_val(self.rTASKS[self.rank], attr='type', value='BWD')
@@ -99,14 +96,9 @@ class Worker(object): # each rank process
         fwd_layers = [layer for vt in fwd_tasks for layer in vt.layers]
         bwd_layers = [layer for vt in bwd_tasks for layer in vt.layers]
         self.local_layers = set(fwd_layers + bwd_layers)
-        print(f"rank:{self.rank}, 当前rank上的fwd层为:{fwd_layers}")
-        print(f"rank:{self.rank}, 当前rank上的bwd层为:{bwd_layers}")
-        print(f"rank:{self.rank}, 当前rank上的层为:{self.local_layers}")
 
         fwd_vts = [vt.layers for vt in fwd_tasks]
         bwd_vts = [vt.layers for vt in bwd_tasks]
-        print(f"rank:{self.rank}, 当前rank上的fwd vt为:{fwd_vts}")
-        print(f"rank:{self.rank}, 当前rank上的bwd vt为:{bwd_vts}")
 
 
         layer_id_to_rank = {}
@@ -147,7 +139,6 @@ class Worker(object): # each rank process
         self.layer_id_to_layer_idx = {}
         for vt in rTASKS[self.rank]:
             self.layer_id_to_layer_idx[vt.idx] = {}
-        # layer idx是在一个vt内的概念
         for vt in rTASKS[self.rank]:
             layer_idx = 0
             for layer_id in vt.layers:
@@ -211,8 +202,6 @@ class Worker(object): # each rank process
             # if vt.has_data and vt.has_criterion:
             #     trans_layers = trans_layers-2
             max_trans_layers = max(trans_layers, max_trans_layers)
-
-        print(f"rank:{self.rank}, 该rank上最大的vt有{max_trans_layers}个transformer layer")
 
 
 
@@ -606,7 +595,6 @@ class Worker(object): # each rank process
             
             elif m.medium == "MSG": # message pass stashed input
                 if self.nvprof: nvtx_range_push("task{}({}) SwapIn(#{}StashX)".format(vt.idx, vt.show_layers(), ubatch_idx)) 
-                # 该参数默认为false，执行else
                 if self.args.no_prefetch_stashx:
                     X_named_tensors = swapin_stashx_handler.fetch(l, self.XMETA.get(ubatch_size,l))
                 else:
@@ -765,7 +753,6 @@ class Worker(object): # each rank process
             turn_on_X_grad(X_named_tensors)
             if self.nvprof: nvtx_range_push("task{}({}) Recompute(#{})".format(vt.idx, vt.show_layers(), ubatch_idx)) 
            
-            # print(f"rank:{self.rank}, vt{vt.idx}({vt.type})({vt.show_layers()})({ubatch_idx})准备开始recompute", flush=True)
             if len(vt.layers) > 1: # packed
                 Y_tensors = [X_named_tensors[name] for name in X_names]
                 for l in vt.layers[:-1]:
@@ -966,14 +953,12 @@ class Worker(object): # each rank process
                             if self.verbose: print_gpu_mem(self.rank, vt, "SwapIn(W,B) end")
                             if self.nvprof: nvtx_range_pop() 
                             ### Run through each microbatch in a data batch
-                            # 2.有多少个microbatch就跑多少次前向
-                            #   从函数的运行结果来看, 就是不断的向目标rank发送计算出来的Y
                             for i, u in enumerate(vt.ubatchszs):
                                 self._a_pack_forward_an_ubatch(vt, i, u,
                                         data_ubatches, target_ubatches, 
                                         requires_grad=False, 
                                         prefetch_model_handler=self.prefetch_model_handler,
-                                        swapin_stashx_handler=self.swapin_stashx_handler,# 新建一个swapin_stream，专门用来 swap in stashX
+                                        swapin_stashx_handler=self.swapin_stashx_handler,
                                         swapin_localx_handler=self.swapin_localx_handler,
                                         swapin_msgx_handler=self.swapin_msgx_handler,
                                         swapout_stashx_handler=self.swapout_stashx_handler,
@@ -983,7 +968,6 @@ class Worker(object): # each rank process
                                 if self.verbose: print_gpu_mem(self.rank, vt, "End(#%d)" % i)
                                 if self.nvprof: nvtx_range_pop() 
                                 gc.collect()
-                            # print(f"rank{self.rank}, vt.idx:{vt.idx}, {vt.type}, FWD执行完成",flush=True)
                             ### Prefetch point @ FWD Del
                             self.default_stream.synchronize() # CPU wait Compute
                             if self.nvprof: nvtx_range_push("task{}({}) PrefetchPt".format(vt.idx, vt.show_layers() )) 
@@ -992,9 +976,6 @@ class Worker(object): # each rank process
 
                             if self.swapin_msgx_handler is not None and not self.args.no_prefetch_msgx:
                                 # self.sucinfo.msgx()：
-                                # 若当前vt和后继vt的情况为：FWD -> 首个BWD，且suc_vt的输入X的媒介为MSG，返回suc_vt首层的层号、输入X的元数据
-                                #
-                                # 
                                 self.swapin_msgx_handler.prefetch_suc(self.sucinfo.msgx())
                             # if self.swapin_stashx_handler is not None and not self.args.no_prefetch_stashx:
                             #     self.swapin_stashx_handler.prefetch_suc(self.sucinfo.stashx())
@@ -1033,7 +1014,7 @@ class Worker(object): # each rank process
                                                             data_ubatches, target_ubatches, 
                                                             requires_grad=True,
                                                             swapin_stashx_handler=self.swapin_stashx_handler,
-                                                            swapin_localx_handler=self.swapin_localx_handler,# vDP专用，vPP为None
+                                                            swapin_localx_handler=self.swapin_localx_handler,
                                                             swapin_msgx_handler=self.swapin_msgx_handler,
                                                             sucinfo=self.sucinfo)
                             if self.nvprof: nvtx_range_pop() 
@@ -1044,8 +1025,8 @@ class Worker(object): # each rank process
                             ### Backward pass on recomputed graph
                             self._a_pack_backward_an_ubatch(vt, i, u,
                                                         X_named_tensors, Y_named_tensors,
-                                                        swapin_localx_handler=self.swapin_localx_handler,# vDP专用，vPP为None
-                                                        swapout_localx_handler=self.swapout_localx_handler,# vDP专用，vPP为None
+                                                        swapin_localx_handler=self.swapin_localx_handler,
+                                                        swapout_localx_handler=self.swapout_localx_handler,
                                                         sucinfo=self.sucinfo,
                                                         iteration_num=it)
                             if self.verbose: print_gpu_mem(self.rank, vt, "End(#%d)" % i)

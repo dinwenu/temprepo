@@ -140,7 +140,6 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
     
     # initialize shared model on CPU  
     for vlayer, _1, _2 in model:
-        print("vlayer的类型是", type(vlayer),", 类名是:", vlayer.__class__.__name__)
         print(_1,_2)
         vlayer.share_memory() # move parameter into shared memory    
     pcm.print("shared model created")
@@ -162,7 +161,6 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
     assert torch.cuda.memory_reserved() == 0, "fork process begins w/ alloc = {} B".format(torch.cuda.memory_reserved()) 
     
     processes = []
-    print(f"是否使用参数 arg.numa_bind:{args.numa_bind}")
     if args.numa_bind:
         from utils import NumaBinder
         numa_binder = NumaBinder(args.numa_bind_config)
