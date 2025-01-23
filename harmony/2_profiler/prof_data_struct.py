@@ -63,7 +63,6 @@ class Time(object):
         repre += "-----------------------------------------------------------"
         return repre
 
-    # 
     def reset(self, type, ubatchsize, vlayer_id, device, time=0.0):
         assert isinstance(time,float)
         if type in ["FWD","BWD"]:
@@ -73,7 +72,6 @@ class Time(object):
         else:
             raise ValueError("unknown type={}".format(type))
 
-    # self.stats[FWD/BWD][ubatchsize][vlayer_id][device] += time
     def add(self, type, ubatchsize, vlayer_id, device, time):
         assert isinstance(time,float)
         if type in ["FWD","BWD"]:
@@ -110,7 +108,6 @@ class Time(object):
         else:
             raise ValueError("unknown type={}".format(type))
 
-    # 返回所有的microbatchsize的列表。[1,2,3,...](1~最大的fwd/bwd_ubsize)
     def get_ubatchsizes(self, type):
         assert type in ['FWD','BWD']
         return list(self.stats[type].keys())
@@ -285,8 +282,6 @@ class TensorMeta():
         else:
             return "<'{}':{},{}>".format(self.name,tuple(self.shape),self.dtype)
     
-    # 若meta当前记录的输入只是一个单个的sample，并非一个batch，将meta中保存的输入的shape变为ubatchsize的大小，即
-    # [1024]->[ubatchsize, 1024]。同时将is_ubatch这个成员变量置为true，即输入是一个batch
     def add_ubatch(self, ubatchsize):
         if not self.is_ubatch: # e.g. un-batched data sample
             self.shape = tuple([ubatchsize]+list(self.shape)) # insert ubatchsize to the left most dimension
@@ -336,8 +331,6 @@ class TensorMeta():
 
 class XMeta(object): 
     # { ubatchsize: { vlayer_id: { name:TensorMeta, name:ConstMeta, name:[TensorMeta,TensorMeta] } } } }
-    # ubatchsizes是一个有三个值的列表，代表 first, last, step, 会被解包传给range
-    # 为每一个ubatchsize设置一个有序字典，该字典中的key为vlayer_id（从0开始），遍历每一个id，将值初始化为None
     def __init__(self, ubatchsizes, num_vlayers):
         self.stats = ODict() 
         for ubatchsize in range(*ubatchsizes): 
@@ -369,16 +362,10 @@ class XMeta(object):
         repre += "-----------------------------------------------------------"
         return repre
 
-    # 给成员变量有序字典stats中的每一个ubatchsize的第0层（vlayer_id=0）赋值，即为第0层生成一个有序字典，字典的name为输入
-    # 名称，值为根据第二个参数 data_tensors 生成的元数据，后面会根据元数据生成相同形状和类型的随机tensor
     def init_data_meta_on_vlayer0(self, data_names, data_tensors):
-        # 为stats中的每一个ubatchsize的第0层（vlayer_id=0）赋值
         for ubatchsize in self.stats.keys():
-            # 为第0层赋值，在stats中，每个vlayer_id还是一个ODict，key为name，即输入的名字，value为TensorMeta，即tensor的元信息
-            # self.stats[ubatchsize][vlayer_id=0][X_names[0]] = TensorMeta/[TensorMeta, ...]
             self.set(ubatchsize, 0, data_names, data_tensors, is_ubatch=False)
 
-    # self.stats[ubatchsize][vlayer_id][X_names[0]] = TensorMeta/[TensorMeta, ...]
     def set(self, ubatchsize, vlayer_id, X_names, X_tensors, is_ubatch=True):
         assert isinstance(X_names, list)
         if type(X_tensors) in [torch.Tensor, Variable, int]:
@@ -387,12 +374,8 @@ class XMeta(object):
             X_tensors_list = list(X_tensors)
         else:
             raise ValueError("unknown X={}".format(X_tensors))
-
-        # print(f"len(X_names):{len(X_names)},len(X_tensors_list):{len(X_tensors_list)}")
         
-        # 在states的ubatchsize这个ODict中，每一个key，即vlayer_id，依然是一个ODict()
         self.stats[ubatchsize][vlayer_id] = ODict()
-        # 若输入名称只有一个，但tensor有多个，说明输入是一个batch，is_ubatch为True
         if len(X_names) == 1 and len(X_tensors_list) > 1:
             self.stats[ubatchsize][vlayer_id][X_names[0]] = [TensorMeta(X_names[0], t.shape, t.dtype, is_ubatch=True) for t in X_tensors_list]
         else:
@@ -505,27 +488,15 @@ class XMeta(object):
     #                 name3 = "X%d_3"%vlayer_id
     #                 self.stats[ubatchsize][vlayer_id][name3] = [ TensorMeta(name3, torch.Size([ubatchsize,vlayer_id+1]), dtype, True) for _ in range(2) ]
 
-# T就是target，即代表最终计算损失时使用的标签tensor
 class TMeta(XMeta): 
     # { ubatchsize: { last_vlayer_id: {name:TensorMeta} } } }
     def __init__(self, ubatchsizes, num_vlayers):
         super().__init__(ubatchsizes, num_vlayers)
         self.last_vlayer_id = num_vlayers-1
-        # print(self.stats)
-        # OrderedDict([(1, OrderedDict([(0, None), (1, None), (2, None), (3, None), (4, None), (5, None), (6, None), 
-        # (7, None), (8, None), (9, None), (10, None), (11, None), (12, None), (13, None), (14, None), (15, None),
-        #  (16, None), (17, None), (18, None), (19, None), (20, None), (21, None), (22, None), (23, None), (24, None), (25, None), (26, None), (27, None)]))])
-        
-        # 遍历每一个{ubatchsize：ODict}的键值对，删除ODict中除最后一层外的每个{vlayer_id:None}键值对
-        # 执行结束后，self.stats[ubatchsize]这个字典中，
-        #              {vlayer_id：{name：TensorMeta}}
         for ubatchsize, vlayer_metas in self.stats.items():
             for vlayer_id in list(vlayer_metas.keys()):
                 if vlayer_id != self.last_vlayer_id:
-                    # 删除vlayer_id对应的键值对
                     del vlayer_metas[vlayer_id]
-        # print(self.stats)
-        # OrderedDict([(1, OrderedDict([(27, None)]))])
     
     @property
     def last_vlayer_id(self):
@@ -541,27 +512,21 @@ class TMeta(XMeta):
     def init_target_meta_on_last_vlayer(self, target_names, target_tensors):
         self.target_names = target_names
         for ubatchsize in self.stats.keys():
-            # self.stats[ubatchsize][self.last_vlayer_id][target_names[0]] = TensorMeta/[TensorMeta, ...]
             self.set(ubatchsize, self.last_vlayer_id, target_names, target_tensors, is_ubatch=False)
 
-# Weight相关的元数据
 class WMeta(object): 
     # TODO: move __init__ functionality out side of this data struct
     def __init__(self, model, attr_name="named_parameters"):
-        print(f"\t...........................attr_name:{attr_name}....................................")
         assert isinstance(model, list)
         assert attr_name in ["named_parameters", "named_buffers"]
         # per parameter size
-        # 为model的每一层建立一个字典 {参数的名字：TensorMeta(参数的元数据)}
-        self.param_size = ODict() # { vlayer_id: { name:TensorMeta / name:ConstMeta } or None }        
+        self.param_size = ODict() # { vlayer_id: { name:TensorMeta, name:ConstMeta } or None }        
         for vlayer_id, (vlayer, _, _) in enumerate(model):
             if len(list( getattr(vlayer, attr_name)() )) == 0:
                 self.param_size[vlayer_id] = None
             else:
-                print(f"\t.....................{vlayer_id} 层的 {attr_name} 存在................")
                 self.param_size[vlayer_id] = ODict()
                 for name, param in getattr(vlayer, attr_name)():
-                    print(f"{name}:{param}")
                     if isinstance(param, (torch.Tensor, Variable)):
                         self.param_size[vlayer_id][name] = TensorMeta(name, param.data.shape, dtype=param.data.dtype, is_ubatch=False)
                     elif isinstance(param, (int, float)):
@@ -569,7 +534,6 @@ class WMeta(object):
                     else:
                         raise ValueError("unknown type of parameter: {}".format(param))
         # per vlayer size
-        # 为model的每一层建立一个字典 {vlayer_id: 参数的大小(bytes)}
         self.vlayer_size = ODict() # { vlayer_id: 100 bytes or 0 bytes }
         for vlayer_id, name_metas in self.param_size.items():
             if name_metas is None:
@@ -600,20 +564,17 @@ class WMeta(object):
     def get_bytes(self, vlayer_id):
         return self.vlayer_size[vlayer_id]
 
-# buffer相关的元数据
 class BMeta(WMeta):
     def __init__(self, model):
         super().__init__(model, attr_name="named_buffers")
     def __repr__(self):
         return super().__repr__('B')
 
-# 优化器状态相关的元数据
 class KMeta(object): 
     # TODO: move __init__ functionality out side of this data struct
     def __init__(self, model, optimizer):
         assert isinstance(model, list) and isinstance(optimizer, list) and len(model)==len(optimizer)
         # confirm model and optimizer are on CPU
-        # 1.确认模型和优化器状态都在CPU上
         for (vlayer,_,_), optim in zip(model, optimizer):
             if optim is not None:
                 assert not next(vlayer.parameters()).is_cuda
@@ -621,54 +582,15 @@ class KMeta(object):
                     if isinstance(v, torch.Tensor):
                         assert not v.data.is_cuda
         # create zero gradient 
-        # 2.将模型参数的 梯度 初始化为与参数数据形状相同的全零张量
         for vlayer,_,_ in model:
             if len(list(vlayer.parameters())) != 0:
                 for param in vlayer.parameters():
                     param.grad = torch.zeros_like(param.data)
-
-        # print("\t.........输出模型的每一层看看.......")
-        # for vlayer_id,(vlayer,_,_) in enumerate(model):
-        #     print(f"{vlayer_id}")
-        #     for param in vlayer.parameters():
-        #         print(f"{param}, {param.shape}")
-
         # force initialization of optimizer states (Bert, GPT2, Adam, SGD)
-        # 3.手动初始化优化器状态
-
-        # 在初始化优化器之前，优化器是存在的。优化器是一个字典，📌但其key和value都是空的
-        # optim = { param : {"step": 0, "exp_avg": tensor, "exp_avg_sq": tensor} }
-        # print("优化器列表的长度为：", len(optimizer))
-        # print("\t.........手动初始化优化器状态之前.......")
-        # for vlayer_id, optim in enumerate(optimizer):
-        #     if optim is not None:
-        #         print(f"\t...vlayer_id: {vlayer_id}, 这一层的优化器不为空...")
-        #         for k, v in optim.state.items():
-        #             print("k:", k, ", v:", v)
-        #     else:
-        #         print("\tvlayer_id: ", vlayer_id, " 为空")
-
         for optim in optimizer:
             if optim is not None:
                 optim.step() 
-
-        # 📌在强制初始化后，优化器的key即vlayer的参数，value中的step为1，一阶动量和二阶动量初始化为0张量，其shape均与
-        # 参数相同。注意优化器这个字典可能会包含多个键值对
-        # print("\t.........初始化优化器状态之后.......")
-        # for vlayer_id, optim in enumerate(optimizer):
-        #     if optim is not None:
-        #         print(f"\t...vlayer_id: {vlayer_id} 这一层的优化器不为空...")
-        #         for k, v in optim.state.items():
-        #             print(f"k: {k}, k.shape: {k.shape}")
-        #             print(f"v: {v}")
-        #             print(f"优化器状态字典中tensor的shape, v[exp_avg].shape: {v['exp_avg'].shape}, v[exp_avg_sq].shape: {v['exp_avg_sq'].shape}")
-        #     else:
-        #         print("\tvlayer_id: ", vlayer_id, " 为空")
-        # exit(0)
-
         # get per state size
-        # 4.将每一层的优化器的v:{"step": 0, "exp_avg": tensor, "exp_avg_sq": tensor}中的每一个键值对单独存起来
-        # self.state_size[vlayer_id][pid]["exp_avg"] = TensorMeta(tensor的元数据) （pid就是该optim的第几个参数）
         self.state_size = ODict() # { vlayer_id: { param.id : { state.name:TensorMeta, state.name:ConstMeta } } or None }        
         for vlayer_id, optim in enumerate(optimizer):
             if optim is None:
@@ -676,7 +598,6 @@ class KMeta(object):
             else: # optim of this vlayer
                 self.state_size[vlayer_id] = ODict()
                 assert optim.state, "optimizer state must be initialized by dummy grad and step" # non-empty
-                # pid就是该optim的第几个参数
                 for pid, (param, states) in enumerate(optim.state.items()): # self.state = { param : {"step": 0, "exp_avg": tensor, "exp_avg_sq": tensor} } # per-param's optimization state (e.g, momentum_buffer, exp_avg, etc.). 
                     self.state_size[vlayer_id][pid] = ODict()
                     for k, v in states.items():
@@ -687,9 +608,7 @@ class KMeta(object):
                         else:
                             raise ValueError("unknown state {}:{}".format(k,v))
         # print("self.state_size={}".format(self.state_size)) # DEBUG
-
         # get per vlayer size
-        # 5.计算每一层的总参数量的空间占用，并存起来，{ vlayer_id: 100 bytes or 0 bytes }
         self.vlayer_size = ODict() # { vlayer_id: 100 bytes or 0 bytes }
         for vlayer_id, param_states in self.state_size.items():
             if param_states is None:
@@ -724,10 +643,10 @@ class KMeta(object):
     def get_bytes(self, vlayer_id):
         return self.vlayer_size[vlayer_id]
 
-def save_prof_data_struct(data_struct, path_dir, fname, base_dir="my_prof", verbose=True):
+def save_prof_data_struct(data_struct, path_dir, fname, base_dir="prof", verbose=True):
     if ".pickle" not in fname:
             fname += ".pickle"
-    assert os.path.exists(path_dir) # ../../rsults/gpt2_medium
+    assert os.path.exists(path_dir)
     if base_dir is None:
         full_path = os.path.join(path_dir, fname)
     else:
@@ -735,17 +654,14 @@ def save_prof_data_struct(data_struct, path_dir, fname, base_dir="my_prof", verb
         os.makedirs(full_dir, exist_ok=True)
         full_path = os.path.join(full_dir, fname)
            
-    # 使用pickle.dump()将data_struct保存到文件中
     with open(full_path,'wb') as f:
         pickle.dump(data_struct, f)
-    # 如果data_struct的类型是整数（int），则将文件的后缀修改为".json"，并使用json.dump()将data_struct保存为JSON格式的文件
     if isinstance(data_struct,int):
         full_path = full_path.replace(".pickle", ".json")
         with open(full_path, 'w') as f:
             json.dump(data_struct, f)
     if verbose: print("prof_data_struct saved to: {}".format(full_path))
 
-# 加载保存在pickle文件中的数据结构
 def load_prof_data_struct(path_dir, fname, base_dir="prof", verbose=True):
     if ".pickle" not in fname:
         fname += ".pickle"
@@ -760,5 +676,3 @@ def load_prof_data_struct(path_dir, fname, base_dir="prof", verbose=True):
     if verbose: print("prof_data_struct load from: {}".format(full_path))
     
     return fdata
-
-

@@ -13,7 +13,6 @@ import sys
 from prof_data_struct import *
 
 """ Analyze Profiles of a Pack """
-# 根据type, ubatchsize从 第2阶段 保存的class中取出 [start_id, end_id] 这几层保存的时间（type为FWD/BWD/UDP）
 def time_of_pack(prof, type, ubatchsize, start_id, end_id, offload_optim=True, interp_ubatchsize=True):
     assert start_id <= end_id, "a pack is [start_id, end_id]"
     if type in ["FWD", "BWD"]:
@@ -30,19 +29,12 @@ def time_of_pack(prof, type, ubatchsize, start_id, end_id, offload_optim=True, i
             return sum([prof["TIME_UPD"].get(type, None, id, "GPU") for id in range(start_id, end_id+1)]) 
     # Return Sec
 
-# 对FWD，BWD：返回整个计算过程中产生的显存占用
-# 对UDP：返回0 ，因为优化器被卸载到cpu了
 def memory_of_pack(prof, type, ubatchsize, start_id, end_id, offload_optim=True, interp_ubatchsize=True):
     assert start_id <= end_id, "a pack is [start_id, end_id]"
     if type in ["FWD", "BWD"]:
-        # 所有层在执行过程中产生的 张量分配的最大内存量 的和
         memory_sum = sum([prof["MEMORY_FWDBWD"].get(type, ubatchsize, id, interp=interp_ubatchsize) for id in range(start_id, end_id+1)]) 
-        # （start_id+1 即 start_id 这一层产生的输出tensor的大小。）所有层产生的输出的大小之和
         xmeta_sum = sum([prof["XMETA"].get_bytes(ubatchsize, id, interp=interp_ubatchsize) for id in range(start_id+1, end_id+1)])            
-        # MEMORY_FWDBWD的每一个id本身就包含了这一层的输入和输出，在拿取id+1的值时，id+1的输入其实就是id层的输出。因此要把重复计算的部分减去
         return int(memory_sum - xmeta_sum) # linear interp (per vlayer, then sub to be packed memory)
-    
-    # 本文只提供卸载优化器的代码，因此永远返回0
     elif type in ["UPD"]:
         if offload_optim:
             return 0
@@ -50,7 +42,6 @@ def memory_of_pack(prof, type, ubatchsize, start_id, end_id, offload_optim=True,
             return sum([prof["MEMORY_UPD"].get(type, None, id) for id in range(start_id, end_id+1)]) 
     # Return byte
 
-# 
 def model_size_of_pack(prof, which, start_id, end_id):
     assert start_id <= end_id, "a pack is [start_id, end_id]"
     assert which in ['W','B','K','WMETA','BMETA','KMETA']

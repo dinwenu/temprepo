@@ -65,7 +65,6 @@ do
     --mode ${MODE} \
     --num_gpus ${N} \
     --verbose \
-    # |& tee gpt2_medium_v1_重新绑定结果.txt
     done
   done
 done

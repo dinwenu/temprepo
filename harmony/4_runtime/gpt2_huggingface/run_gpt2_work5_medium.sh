@@ -32,7 +32,6 @@ python3 main_work5.py \
 --seed ${SEED} \
 --output_dir ${OUT_DIR} \
 --no_prefetch_model \
-# |& tee gpt2_medium_work5_死锁问题.txt
 # --nvprof \
 # --nvprof_iter "all"
 # |& tee ${OUT_DIR}/log.txt

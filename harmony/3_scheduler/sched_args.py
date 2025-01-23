@@ -32,8 +32,7 @@ def initialize_args():
     parser.add_argument("--packing_method_bwd", type=str, nargs='+', 
                         default=['greedy_reverse_addx', 'balanced_addx', 'balanced_time'], 
                         help="choose from ['greedy','greedy_addx','greedy_reverse','greedy_reverse_addx','balanced','balanced_addx','balanced_time']")
-    # GPU的大小
-    parser.add_argument("--memory_cap", type=float, default=21.0*(1024.**3), # 原来是10.0
+    parser.add_argument("--memory_cap", type=float, default=10.0*(1024.**3),
                         help="per-GPU memory capacity in bytes")
     parser.add_argument("--memory_cap_scale", type=float, default=1.0,
                         help="scale factor for Per-GPU memory capacity. Consider CUDA context, NCCL context, and anything non-ideal for memory estimation.")
@@ -71,13 +70,10 @@ def initialize_args():
                         default=["prof_TIME_FWDBWD","prof_MEMORY_FWDBWD","prof_XMETA","prof_TMETA","prof_TIME_UPD","prof_WMETA","prof_BMETA","prof_KMETA"])
     parser.add_argument("--prefetch_offload", default=False, action='store_true', 
                         help="whether simulation uses all_prefetch_offload")
-    # 11.5Gb/s
     parser.add_argument("--bw_swap", type=float, default=11.5*1024**3,        
                         help="actual CPU swap bandwidth (per-direction) (bytes/sec)")
-    # 8.2Gb/s
     parser.add_argument("--bw_p2p", type=float, default=8.2*1024**3,        
                         help="actual P2P bandwidth (per-direction) (bytes/sec)")
-    # 16Gb/s
     parser.add_argument("--bw_msg", type=float, default=128/8*1024**3,        
                         help="actual MSG bandwidth (per-direction) (bytes/sec)")
     parser.add_argument("--time_del", type=float, default=40./1000,        
@@ -126,4 +122,3 @@ def initialize_args():
     print("----------------------------------")  
 
     return args
-

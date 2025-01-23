@@ -47,21 +47,15 @@ def allreduce_cpu_loss(loss, averaging=True):
         t /= float(dist.get_world_size())
     return t.item()
 
-# 从不同进程中收集 整数，目标进程会收集所有进程发送的整数，并返回一个整数列表
 def gather_integer(integer, rank, dst=0):
     assert isinstance(integer, int)
     t = torch.tensor(integer, dtype=torch.int64, device='cpu')
-    # 如果当前rank等于目标rank
-    # 创建一个列表 gather_list，其中包含了与当前分布式环境中的进程数量相同数量的零整数张量。每个进程将在这个列表中的对应位置收集到数据
     if rank == dst:
         gather_list = [ torch.tensor(0, dtype=torch.int64, device='cpu') 
                                     for _ in range(dist.get_world_size()) ] 
     else:
         gather_list = None
-    # 在分布式环境中执行 gather 操作，从所有rank中收集整数。如果当前rank等于目标rank，则 gather_list 中将收集到来自各个rank的整数；
-    # 否则，当前rank将发送自己的整数到目标rank
     dist.gather(t, gather_list=gather_list, dst=dst)
-    # 若当前rank即目标rank，将 gather_list 中的整数张量转换为整数值，并返回这些整数值组成的列表
     if rank == dst:
         return [t.item() for t in gather_list]
     else:
@@ -76,40 +70,16 @@ def load_model(src_state_dict, dst_model, verbose=False):
     """
     assert isinstance(src_state_dict, ODict)
     assert isinstance(dst_model, list)
-
-    if True:
-        print(f"src_state_dict length: {len(src_state_dict)}")
-        print("src_state_dict keys:", list(src_state_dict.keys()))
-    
-    def count_dst_model_params(dst_model):
-        """Count the number of parameters in dst_model."""
-        total_params = 0
-        for i, (vlayer, _, _) in enumerate(dst_model):
-            layer_params = len(vlayer.state_dict())
-            # print(f"Layer {i}: {layer_params} parameters")
-            total_params += layer_params
-        print(f"Total layers in dst_model: {total_params}")
-        return total_params
-    print(count_dst_model_params(dst_model))
-
     src_sdict_iter = iter(src_state_dict.items())
     for i, (vlayer, _, _) in enumerate(dst_model):
-        # if True:
-        #     print(f"Processing layer {i} with state_dict keys: {list(vlayer.state_dict().keys())}")
         new_state_dict = ODict()
         for key, val in vlayer.state_dict().items():
-            try:
-                src_key, src_val = next(src_sdict_iter)
-                assert val.shape == src_val.shape
-                assert val.dtype == src_val.dtype
-                new_state_dict[key] = src_val
-            except StopIteration:
-                print(f"Warning: ran out of src_state_dict entries when processing {key} in layer {i}")
-                new_state_dict[key] = val
+            src_key, src_val = next(src_sdict_iter)
+            assert val.shape == src_val.shape
+            assert val.dtype == src_val.dtype
+            new_state_dict[key] = src_val
         vlayer.load_state_dict(new_state_dict)
-    dst_model[-2][0].layer1.lm_head.weight = dst_model[0][0].layer2.wte.weight
     if verbose: print("model loaded")
-
 
 def copy_model(src_model, dst_state_dict, verbose=False):
     """ in-place copy state dict of Harmony model to a baseline model.
@@ -169,7 +139,6 @@ def print_gpu_mem(rank, vt, description):
             int(torch.cuda.memory_allocated(rank)/1024.0/1024.0),
             int(torch.cuda.memory_reserved(rank)/1024.0/1024.0) ))  
 
-# 
 def print_p2p_bytes(rank, p2px_handler, p2pm_handler, update_cnt):
     if p2px_handler is not None:
         p2pout_bytes = p2px_handler.send_byte_cnt/float(update_cnt)
@@ -222,8 +191,6 @@ class PrintCPUMem(object):
             ps.append('%s %s'%(name.capitalize(),value))
         return ', '.join(ps)
 
-    # 若给定的metric为occupied：
-    # 返回 ["occupied"：已使用的物理内存量]
     def system_cpu_memory(self, metrics=["used", "shared", "available", "swap", "occupied"]):
         """ 
         return current system-level cpu memory usage as a string:
@@ -252,20 +219,15 @@ class PrintCPUMem(object):
         named_tuple2 = psutil.swap_memory() # sswap(total=1023406080, used=0, free=1023406080, percent=0.0, sin=0, sout=0)
         ps = []
         for name in metrics:
-            # 备注：中是一种特殊用途的虚拟内存区域，它的主要功能是在物理内存（RAM）不足时，
-            # 将部分不经常使用的内存数据（如一些程序和它们的数据）暂时转移到硬盘上的一个特定空间
             if name == "swap":
                 value = getattr(named_tuple2, 'used')
             elif name == "occupied":
-                # 计算已使用的物理内存量，即total - available
                 value = getattr(named_tuple, 'total') - getattr(named_tuple, 'available')
             else:
                 value = getattr(named_tuple, name)
             #
-            # 使用bytes2human函数将字节数转换为易读的单位（如GB、MB）
             if name != 'percent':
                 value = bytes2human(value)
-            # 构建每个度量标准的字符串表示，形如"名称 值"，并将它们添加到一个列表中
             ps.append('%s %s'%(name.capitalize(),value))
         return ', '.join(ps)
 

@@ -7,8 +7,6 @@ mkdir -p ${OUT_DIR}
 # echo "Clean Python Processes"
 # sleep 1s && pkill -9 python3 && pkill -9 python && sleep 1s
 
-# 通过替换模型每一层的前向执行函数，跑一次FWD，在这个过程中创建node（层）和node之间的指向关系（保存在graph实例中），
-# 最后将graph字符串化写入txt文件
 echo "Creating Graph"
 python3 test_gl_gpt2.py \
 --train_data_file "../../../data/wikitext-103-tokens/wiki.train.tokens" \

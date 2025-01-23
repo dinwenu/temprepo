@@ -12,7 +12,6 @@ CONFIG_PATH="../../../model_lib/gpt2_configs/gpt2-medium-config.json"
 
 # export CUDA_VISIBLE_DEVICES=0,1
 
-# 前向测一次，后向测一次
 for PROBE_WHAT in "FWD" "BWD"
 do
 echo "Probe ${PROBE_WHAT}"
@@ -24,8 +23,6 @@ python3 main.py \
  --mode "probe" \
  --outname_suffix "_gpt2_medium_3090" \
  --probe_what ${PROBE_WHAT}
-#  --verbose
-#  |& tee gpt2_medium_查看BWD的memory占用.txt
 done
 
 echo "Profile normally"

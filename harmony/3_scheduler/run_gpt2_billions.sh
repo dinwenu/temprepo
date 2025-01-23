@@ -30,9 +30,8 @@ for MODEL in "gpt2_2-5b" "gpt2_5b" "gpt2_10b" "gpt2_12-5b" "gpt2_15b" # "gpt2_12
 
 do
 
-# 提取模型大小并存入 BILLION 变量
 BILLION=$(echo ${MODEL} | sed 's/gpt2_//g')
-echo "正在处理 Model: ${MODEL}, Billion: ${BILLION}"
+echo "running Model: ${MODEL}, Billion: ${BILLION}"
 
 for D in 16 32 64 128 256
 do
@@ -52,9 +51,6 @@ do
     --mode ${MODE} \
     --num_gpus ${N} \
     --suffix "_gpt2_${BILLION}_3090" \
-    # |& tee gpt2_10b_结果.txt
-    # --verbose \
-    # |& tee gpt2_medium_原版结果.txt
     done
   done
 done

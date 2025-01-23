@@ -118,5 +118,3 @@ def initialize_args(custom_args_provider=None):
     print("----------------------------------")  
 
     return args
-
-

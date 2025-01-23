@@ -65,8 +65,6 @@ do
     --mode ${MODE} \
     --num_gpus ${N} \
     --suffix "_gpt2_xl_3090"
-    # --verbose \
-    # |& tee gpt2_medium_原版结果.txt
     done
   done
 done

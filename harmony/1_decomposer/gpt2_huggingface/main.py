@@ -45,7 +45,6 @@ from gpt2_huggingface.tokenization_gpt2 import GPT2Tokenizer as AutoTokenizer
 from gpt2_huggingface.modeling2_gpt2 import GPT2SimpleModel as AutoModelWithLMHead
 from gpt2_huggingface.optimization2 import AdamW, get_linear_schedule_with_warmup
 from gpt2_huggingface.data_processing import load_and_cache_examples
-from gpt2_huggingface.file_utils import WEIGHTS_NAME
 
 sys.path.append("../../../util_lib"); import seeding
 
@@ -137,17 +136,11 @@ def mask_tokens(inputs, tokenizer, args) -> Tuple[torch.Tensor, torch.Tensor]:
     return inputs, labels
 
 
-# 1.hook：将给定module的每一层，若其没有子层或其名字在白名单中（就是各种GPT2layer），替换其前向传播方法
-#   这样在执行前向传播期间，会自动的建立每层对应的node，并在node之间建立边的关系（通过邻接表建立）
-# 2.用模型跑一个batch，相当于刚刚注册的替代每个module的新forward函数执行了一遍，建立了node、node和node之间的边
-# 3.unhook：恢复每个module原本的forward函数
-# 4.将当前保存了node和node入边出边新的graph实例字符串化并写入到txt文件
 def create_graph(model, data_loader, is_cuda,
                 module_whitelist=["GPT2Embeddings","GPT2Layer","GPT2LayerNorm","GPT2LMHead"], 
                 directory="./logs", verbose=True):
     """Given a model, creates and visualizes the computation DAG of the model in the passed-in directory."""
     if verbose:
-        print(" ")
         print("--- model is ---")
         print(model)
         print("------")    
@@ -160,103 +153,64 @@ def create_graph(model, data_loader, is_cuda,
     import sys; sys.path.append("..")
     from graph_creator import GraphCreator
     graph = GraphCreator(model, module_whitelist=module_whitelist)
-    # 将给定module的每一层，若其没有子层或其名字在白名单中（就是各种GPT2layer），替换其前向传播方法
-    # 这样在执行前向传播期间，会自动的建立每层对应的node，并在node之间建立边的关系（通过邻接表建立）
     graph.hook_modules(model)
-    # 用模型跑一个batch，相当于刚刚注册的替代每个module的新forward函数执行了一遍，建立了node、node和node之间的边
     logits = model(input_ids)[0] # exclude criterion
-    # 恢复每个module原本的forward函数
     graph.unhook_modules()
-    # 1.渲染一个graphviz图
-    # 2.将当前保存了node和node入边出边新的graph实例字符串化并写入到txt文件
     graph.persist_graph(directory)
     print("--- graph created! ---")
 
     exit(0)
 
-# 1.计算训练步数（进行几次iteration），通过参数给定或计算出来，实际上就是1次
-# 2.创建优化器和学习率调度器
-# 3.检查是否存在已保存的优化器和学习率调度器的状态，并在存在时加载它们的状态
-# 4.开始训练，只使用1个样本跑一次前向，创建一个graph例的实例，在前向的过程中保存了node(每一层)和node之间的指向关系
-#   最后将当前保存了node和node入边出边新的graph实例字符串化并写入到txt文件
+
 def train(args, train_dataset, model, tokenizer) -> Tuple[int, float]: 
     """ Train the model """
-    # 在该例子中，就是-1（gpt2-medium.sh）
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
-    #         1                      给定的：1              由于设置了no_cuda参数，n_gpu为0：此处为1
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
-    # 定义一个函数：对输入数据进行填充操作
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
             return pad_sequence(examples, batch_first=True)
-        # 该函数用padding_value来填充一个可变长度的张量列表。将长度较短的序列填充为和最长序列相同的长度
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
-    # 根据本地排名选择不同的采样器，用于对训练数据集进行采样
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate
     )
-    print(f"总训练批次:{len(train_dataloader)}")
 
-    # 1.计算训练步数（进行几次iteration），通过参数给定或计算出来
-    # max_steps=1，执行if
     if args.max_steps > 0:
         t_total = args.max_steps
-        # 通过计算换算出epoch的数量
-        # 分子：最大训练步数
-        # 分母：batch的数量 / 梯度累积的步数 = 参数更新的次数（一个epoch内的步数）
-        # 分子/分母结果：epoch的数量
-        # ❓疑问：按我的理解，不应该是一个batch算一步吗？即使没有进行参数更新，但也跑了一个前后向了啊
-        #          1                  1                    116282                          默认为1
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
     else:
-        # 2.若未设置最大步数，通过epoch数量换算出 总步数
-        # 一个epoch的训练步数（进行几次iteration）×epoch的数量 = 总的训练步数
         t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
 
     model = model.module if hasattr(model, "module") else model  # Take care of distributed/parallel training
 
-    # 2.创建优化器和学习率调度器
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
-    # 对模型中的每一个参数（层）名，若该名称不为 no_decay 列表中的任意一个，则将该层参数加入到第一个字典的"params"对应的列表中
-    # 显然，第二个字典的参数列表中存放着所有名称符合no_decay列表的参数(层)
     optimizer_grouped_parameters = [
         {
             "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-            "weight_decay": args.weight_decay,# 默认为0
+            "weight_decay": args.weight_decay,
         },
         {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
-    # AdamW 是 PyTorch 中的 AdamW 优化器，它是 Adam 优化器的一种变体，通过添加权重衰减（Weight Decay）来避免过拟合，
-    # 特别适用于自然语言处理任务
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    # args.warmup_steps：默认为0
-    #
-    # optimizer 是之前初始化的优化器对象，用于更新模型参数。
-    # num_warmup_steps=args.warmup_steps 指定了学习率在开始阶段进行 warmup 的步数，即在训练初期逐渐增加学习率，以帮助模型更快地收敛。
-    # num_training_steps=t_total 指定了总的训练步数，scheduler 会根据这个值来调整学习率的变化。
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
     )
 
     # Check if saved optimizer or scheduler states exist
-    # 3.检查是否存在已保存的优化器和学习率调度器的状态，并在存在时加载它们的状态
     if (
         args.model_name_or_path
         and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt"))
         and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
     ):
-        print("加载优化器和学习率调度器")
         # Load in optimizer and scheduler states
         optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt")))
         scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt")))
 
-    # 显然该例子是没设置这个的，不用管
     if args.fp16:
         try:
             from apex import amp
@@ -265,12 +219,10 @@ def train(args, train_dataset, model, tokenizer) -> Tuple[int, float]:
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
     # multi-gpu training (should be after apex fp16 initialization)
-    # 该例子为0，略
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
     # Distributed training (should be after apex fp16 initialization)
-    # 该例子没设置local_rank，默认-1，不用管
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
@@ -294,7 +246,6 @@ def train(args, train_dataset, model, tokenizer) -> Tuple[int, float]:
     epochs_trained = 0
     steps_trained_in_current_epoch = 0
     # Check if continuing training from a checkpoint
-    # 从检查点开始继续训练，该例子的这个参数是模型的名字，因此这里不会执行
     if args.model_name_or_path and os.path.exists(args.model_name_or_path):
         try:
             # set global_step to gobal_step of last saved checkpoint from model path
@@ -313,21 +264,12 @@ def train(args, train_dataset, model, tokenizer) -> Tuple[int, float]:
     tr_loss, logging_loss = 0.0, 0.0
 
     model.zero_grad()
-    # trange 是 tqdm 库提供的在循环中显示进度条的方法
     train_iterator = trange(
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
     )
     
     
-    # 4.开始训练，只使用1个样本跑一次前向，创建一个graph例的实例，在前向的过程中保存了node(每一层)和node之间的指向关系
-    #   最后将当前保存了node和node入边出边新的graph实例字符串化并写入到txt文件
-    # 整个程序将在次数退出，内部调用了exit(0)
     if args.local_rank in [-1,0]:
-        # 1.hook：将给定module的每一层，若其没有子层或其名字在白名单中（就是各种GPT2layer），替换其前向传播方法
-        #   这样在执行前向传播期间，会自动的建立每层对应的node，并在node之间建立边的关系（通过邻接表建立）
-        # 2.用模型跑一个batch，相当于刚刚注册的替代每个module的新forward函数执行了一遍，建立了node、node和node之间的边
-        # 3.unhook：恢复每个module原本的forward函数
-        # 4.将当前保存了node和node入边出边新的graph实例字符串化并写入到txt文件
         create_graph(model, train_dataloader, not args.no_cuda, directory=args.graph_dir)
     
 
@@ -658,19 +600,15 @@ def main():
         ptvsd.wait_for_attach()
 
     # Setup CUDA, GPU & distributed training
-    # local_rank 默认为-1
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        # 由于该例子设置了 no_cuda 参数，因此 args.n_gpu 即GPU数量为0
         args.n_gpu = 0 if args.no_cuda else torch.cuda.device_count()
-        print("args.n_gpu: ", args.n_gpu)
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         torch.distributed.init_process_group(backend="nccl")
         args.n_gpu = 1
     args.device = device
-    print("现在使用的设备是：", args.device)
 
     # Setup logging
     logging.basicConfig(
@@ -696,11 +634,8 @@ def main():
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training download model & vocab
 
-    # 创建对应模型配置json文件的config类的实例
     if args.config_name:
         # first arg == 'gpt2-medium' or 'local_model_dir' or 'gpt2-config.json'
-        # 1.加载JSON文件，返回配置字典 和 未使用的关键字参数
-        # 2.从一个字典和额外的关键字参数构建一个config类的实例（GPT2Config）并返回
         config = AutoConfig.from_pretrained(args.config_name, cache_dir=args.cache_dir)
     elif args.model_name_or_path:
         config = AutoConfig.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
@@ -712,7 +647,6 @@ def main():
             "and load it from here, using --config_name"
         )
 
-    # 从预定义的Tokenizer加载词汇文件和配置，并实例化Tokenizer对象
     if args.tokenizer_name:
         # first arg == 'gpt2-medium' or 'local_model_dir'
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, cache_dir=args.cache_dir)
@@ -724,23 +658,12 @@ def main():
             "and load it from here, using --tokenizer_name"
         )
 
-    # block_size默认-1
     if args.block_size <= 0:
         args.block_size = tokenizer.max_len
         # Our input block size will be the max possible for the model
     else:
         args.block_size = min(args.block_size, tokenizer.max_len)
 
-    # 创建模型，并为其加载预训练权重
-    # 1.根据给定的模型名称(model_name_or_path)获取对应的URL
-    # 2.从URL下载模型权重，若已下载，直接返回缓存的文件路径
-    # 3.实例化一个模型对象(当前类：GPT2SimpleModel)
-    # 4.加载权重文件到cpu上，是一个字典
-    # 5.复制权重到新的状态字典中
-    # 6.将整理好的新状态字典加载到模型中
-    # 7.确保模型的输出embedding权重和输入embedding权重是相同的（权重共享）
-    # 8.将模型设置为评估模式，📌因为现在只需跑一次前向（这将禁用 DropOut 模块和其他仅在训练时启用的模块）
-    # 返回模型
     if args.model_name_or_path:
         # first arg == 'gpt2-medium' or 'local_model_dir'
         model = AutoModelWithLMHead.from_pretrained(
@@ -762,14 +685,10 @@ def main():
 
     # Training
     if args.do_train:
-        print("开始训练")
         if args.local_rank not in [-1, 0]:
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
 
-        # train_data_file: 训练数据
-        # tokenizer：将单词序列转化为数字序列（token编号），暂时不用管太多，把它当成一个工具
-        # block_size：指定训练句子的最大长度。当未指定 block size 时，默认值将设置为模型最大输入长度
-        # line-by-line：是否txt中单独的一行会被认为是一个独立的句子
+        
         train_dataset = load_and_cache_examples(args.train_data_file, tokenizer, args.block_size, line_by_line=args.line_by_line)
         rand_state_train.set()
         
@@ -777,19 +696,11 @@ def main():
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        # 训练
-        # 1.计算训练步数（进行几次iteration），通过参数给定或计算出来，实际上就是1次
-        # 2.创建优化器和学习率调度器
-        # 3.检查是否存在已保存的优化器和学习率调度器的状态，并在存在时加载它们的状态
-        # 4.开始训练，只使用1个样本跑一次前向，创建一个graph例的实例，在前向的过程中保存了node(每一层)和node之间的指向关系
-        #   最后将当前保存了node和node入边出边新的graph实例字符串化并写入到txt文件
-        # 程序会在这个函数执行的过程中中断
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
         
     # Saving best-practices: if you use save_pretrained for the model and tokenizer, you can reload them using from_pretrained()
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0) and args.save_steps > 0:
-        print("保存")
         # Create output directory if needed
         if args.local_rank in [-1, 0]:
             os.makedirs(args.output_dir, exist_ok=True)
@@ -814,7 +725,6 @@ def main():
     # Evaluation
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
-        print("评估")
         checkpoints = [args.output_dir]
         if args.eval_all_checkpoints:
             checkpoints = list(
