@@ -74,10 +74,14 @@ def load_model(src_state_dict, dst_model, verbose=False):
     for i, (vlayer, _, _) in enumerate(dst_model):
         new_state_dict = ODict()
         for key, val in vlayer.state_dict().items():
-            src_key, src_val = next(src_sdict_iter)
-            assert val.shape == src_val.shape
-            assert val.dtype == src_val.dtype
-            new_state_dict[key] = src_val
+            try:
+                src_key, src_val = next(src_sdict_iter)
+                assert val.shape == src_val.shape
+                assert val.dtype == src_val.dtype
+                new_state_dict[key] = src_val
+            except StopIteration:
+                print(f"Warning: ran out of src_state_dict entries when processing {key} in layer {i}")
+                new_state_dict[key] = val
         vlayer.load_state_dict(new_state_dict)
     if verbose: print("model loaded")
 

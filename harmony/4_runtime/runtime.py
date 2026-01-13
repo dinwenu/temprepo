@@ -67,13 +67,13 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
     prof = ODict()
     for name in args.profile_fnames:
         key = name.split("prof_")[-1]
-        prof[key] = load_prof_data_struct(module_path, name + args.suffix, verbose=True)
+        prof[key] = load_prof_data_struct(module_path, name + args.suffix, base_dir="my_prof", verbose=True)
     
     # read schedule
     from task_data_struct import Medium, vTask, unserialize_scheduled
     if args.schedule_dir == "":
         args.schedule_dir = module_path
-    rTASKS, CONFIGS = unserialize_scheduled(args.schedule_dir, args.schedule_fname + args.suffix, verbose=False)
+    rTASKS, CONFIGS = unserialize_scheduled(args.schedule_dir, args.schedule_fname + args.suffix, base_dir="my_sched", verbose=False)
     _assert_assumption(CONFIGS)
     
     """ Initialize data. """
