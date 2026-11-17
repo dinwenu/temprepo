@@ -217,4 +217,3 @@ dependencies:
       - pydantic==1.10.20
       - pyyaml==6.0.1
       - tokenizers==0.19.1
-prefix: /home/your-name/miniconda3/envs/your-env-name

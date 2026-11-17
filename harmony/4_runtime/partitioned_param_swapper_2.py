@@ -13,12 +13,32 @@ import torch
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import AsyncIOBuilder
-from .constants import *
-from .utils import swap_in_tensors, swap_out_tensors, MIN_AIO_BYTES, AIO_ALIGNED_BYTES, print_object, SwapBufferPool
+from deepspeed.runtime.swap_tensor.constants import *
+from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, MIN_AIO_BYTES, AIO_ALIGNED_BYTES, print_object, SwapBufferPool
 
-from .utils import swap_in_tensors_sync, swap_out_tensors_sync, swap_in_tensors_sync_2, swap_out_tensors_sync_2
 
 import time
+
+
+def swap_in_tensors_sync_2(swap_handle, tensor_buffers, swap_paths, rank=None):
+    # import os
+    for buffer, path in zip(tensor_buffers, swap_paths):
+
+        # buffer_bytes = buffer.numel() * buffer.element_size()
+        # file_exists = os.path.exists(path)
+        # file_bytes = os.path.getsize(path) if file_exists else -1
+        # rank_str = f"rank:{rank}" if rank is not None else "rank:?"
+
+
+        # print(f"[swap_in_tensors_sync_2] {rank_str} buffer.numel(): {buffer.numel()}, buffer.dtype: {buffer.dtype}, buffer.element_size(): {buffer.element_size()}", flush=True)
+        # if buffer_bytes != file_bytes:
+
+        assert (swap_handle.read(buffer, path, False) == 0)
+
+
+def swap_out_tensors_sync_2(swap_handle, tensor_buffers, swap_paths):
+    for buffer, path in zip(tensor_buffers, swap_paths):
+        assert (swap_handle.write(buffer, path, False) == 0)
 
 def print_rank_0(message, debug=False, force=False):
     if dist.get_rank() == 0 and (debug or force):
@@ -39,13 +59,19 @@ class PartitionedParamStatus(Enum):
 class AsyncPartitionedParameterSwapper(object):
 
     def __init__(self, ds_config, pinned_buffer_information, nvme_layers, model_dtype, layer_id_to_rank, rank):
+
+
         aio_op = AsyncIOBuilder().load(verbose=False)
         self.aio_handle = aio_op.aio_handle
         self.dtype = model_dtype
         self.rank = rank
         self.layer_id_to_rank = layer_id_to_rank
 
+        print(f"rank:{self.rank}, !!!!!!!!!!!!!!!!!!!!!初始化正确")
+
         #set swap buffers, create aio handles
+
+
         self._configure_aio_2(ds_config, pinned_buffer_information, nvme_layers)
 
         #mapping from param id to path
@@ -55,9 +81,11 @@ class AsyncPartitionedParameterSwapper(object):
         self.param_id_to_buffer_id = {}
 
         # mapping from param_id to swap buffer
+
         self.param_id_to_swap_buffer = {}
 
         #number of elements in the param
+
         self.param_id_to_numel = {}
 
         self.pending_writes = 0
@@ -76,6 +104,7 @@ class AsyncPartitionedParameterSwapper(object):
         self.partitioned_swap_buffer = None
         self.partitioned_swap_pool = None
 
+
         self.invalid_buffer = torch.tensor(1).half()
 
         if self.rank == 0:
@@ -85,12 +114,14 @@ class AsyncPartitionedParameterSwapper(object):
     def available_swap_in_buffers(self):
         return len(self.available_buffer_ids)
 
+
     def _configure_aio(self, ds_config):
         self.swap_config = ds_config.zero_config.offload_param
         torch_dtype_string = str(self.dtype).split(".")[1] # torch.float32
 
         self.swap_folder = os.path.join(self.swap_config.nvme_path, 'zero_stage_3', f'{torch_dtype_string}params',
                                         f'rank{dist.get_rank()}')
+
 
         shutil.rmtree(self.swap_folder, ignore_errors=True)
         os.makedirs(self.swap_folder, exist_ok=True)
@@ -102,10 +133,12 @@ class AsyncPartitionedParameterSwapper(object):
         self.aio_config = ds_config.aio_config
 
         # Read/Write alignment for each thread during Intra-request parallelism
-        # 
-        self.min_aio_bytes = max(MIN_AIO_BYTES, self.aio_config[AIO_BLOCK_SIZE]) 
+        #
+        self.min_aio_bytes = max(MIN_AIO_BYTES, self.aio_config[AIO_BLOCK_SIZE])
 
-        self.aligned_bytes = AIO_ALIGNED_BYTES * self.aio_config[AIO_THREAD_COUNT]
+
+        self.aligned_bytes = AIO_ALIGNED_BYTES * self.aio_config[AIO_THREAD_COUNT] # 1024 × 1
+
 
         self.numel_alignment = self.aligned_bytes // self.swap_element_size
 
@@ -119,11 +152,13 @@ class AsyncPartitionedParameterSwapper(object):
         self.available_buffer_ids = [i for i in range(self.param_buffer_count)]
         self.reserved_buffer_ids = []
 
+
         self.buffers = get_accelerator().pin_memory(torch.empty(int(self.aligned_elements_per_buffer *
                                                                     self.param_buffer_count),
                                                                 dtype=self.dtype,
                                                                 requires_grad=False),
                                                     align_bytes=0)
+
 
         self.aio_read_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
                                                self.aio_config[AIO_SINGLE_SUBMIT], self.aio_config[AIO_OVERLAP_EVENTS],
@@ -139,8 +174,11 @@ class AsyncPartitionedParameterSwapper(object):
     def _configure_aio_2(self, ds_config, pinned_buffer_information, nvme_layers):
         self.swap_config = ds_config.zero_config.offload_param
         torch_dtype_string = str(self.dtype).split(".")[1] # torch.float32
+
         self.swap_folder = os.path.join(self.swap_config.nvme_path, 'zero_stage_3', f'{torch_dtype_string}params',
                                         f'rank{self.rank}')
+        print(f"rank:{self.rank}, 当前rank的卸载路径为:{self.swap_folder}")
+
         shutil.rmtree(self.swap_folder, ignore_errors=True)
         os.makedirs(self.swap_folder, exist_ok=True)
 
@@ -152,15 +190,18 @@ class AsyncPartitionedParameterSwapper(object):
         print(f"rank:{self.rank}, aioconfig:{self.aio_config}")
 
         # Read/Write alignment for each thread during Intra-request parallelism
-        # 
+        #
         self.min_aio_bytes = max(MIN_AIO_BYTES, self.aio_config[AIO_BLOCK_SIZE])
 
+
         self.aligned_bytes = AIO_ALIGNED_BYTES * self.aio_config[AIO_THREAD_COUNT] # 1024 × 1
+
 
         self.numel_alignment = self.aligned_bytes // self.swap_element_size
 
 
         self.elements_per_buffer = pinned_buffer_information.get_buffers_size()
+
 
         self.aligned_elements_per_buffer = self.elements_per_buffer
 
@@ -173,6 +214,11 @@ class AsyncPartitionedParameterSwapper(object):
                                                                 requires_grad=False),
                                                     align_bytes=0)
 
+        buffer_numel = int(self.aligned_elements_per_buffer)
+        buffer_bytes = buffer_numel * self.swap_element_size
+        print(f"rank:{self.rank}, buffers tensor: numel={buffer_numel}, bytes={buffer_bytes} ({buffer_bytes / (1024**3):.2f} GB), dtype={self.dtype}")
+        exit(0)
+
         self.pinned_buffer_information = pinned_buffer_information
 
         self.layer_count = self.pinned_buffer_information.layer_count
@@ -182,32 +228,39 @@ class AsyncPartitionedParameterSwapper(object):
         for layer_id in self.nvme_layers:
             self.layer_id_param_idx_to_path[layer_id] = {}
 
-
+        # 📍2
         self.layer_id_to_path = {}
+
 
         self.aio_read_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
                                                self.aio_config[AIO_SINGLE_SUBMIT], self.aio_config[AIO_OVERLAP_EVENTS],
-                                               self.aio_config[AIO_THREAD_COUNT], self.rank)
+                                               self.aio_config[AIO_THREAD_COUNT])
 
         self.aio_write_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
                                                 self.aio_config[AIO_SINGLE_SUBMIT],
-                                                self.aio_config[AIO_OVERLAP_EVENTS], self.aio_config[AIO_THREAD_COUNT], self.rank)
+                                                self.aio_config[AIO_OVERLAP_EVENTS], self.aio_config[AIO_THREAD_COUNT])
 
+        print(f"当前nvme配置为: block_size:{self.aio_config[AIO_BLOCK_SIZE]}, queue_depth：{self.aio_config[AIO_QUEUE_DEPTH]}, single_submit:{self.aio_config[AIO_SINGLE_SUBMIT]}, overlap:{self.aio_config[AIO_OVERLAP_EVENTS]}, thread:{self.aio_config[AIO_THREAD_COUNT]}")
         # exit(0)
         self.swap_out_params = []
 
     #Check if partitioned param or numel in a tensor is swappable or not
+
     def swappable_tensor(self, param=None, numel=None):
         if param is not None:
             assert numel is None, "Both parma and numel cannot be provided"
             numel = param.ds_tensor.ds_numel
+
+
         if numel is not None:
+
             return self.min_aio_bytes <= numel * self.swap_element_size
         assert False, "Either param or numel must be provided"
 
     def get_path(self, param, must_exist=False):
         paths = self._get_swap_paths([param], must_exist=must_exist)
         return paths[0]
+
 
     def _get_swap_paths(self, params, must_exist=False):
         paths = []
@@ -217,12 +270,15 @@ class AsyncPartitionedParameterSwapper(object):
                 param_path = self.id_to_path[param_id]
             else:
                 assert not must_exist, f"Path for param id {param_id} does not exist"
+
+
                 param_path = os.path.join(self.swap_folder, f'{param_id}_param.tensor.swp')
 
                 self.id_to_path[param_id] = param_path
             paths.append(param_path)
 
         return paths
+
 
     def _get_swap_paths_2(self, layer_id, param_idx, layer_idx=None, must_exist=False):
         owner_rank = self.layer_id_to_rank[layer_id]
@@ -243,6 +299,7 @@ class AsyncPartitionedParameterSwapper(object):
             self.layer_id_param_idx_to_path[layer_id][param_idx] = param_path
         return param_path
 
+    # 📍2
     def _get_transformer_layer_swap_paths(self, layer_id, layer_idx=None, must_exist=False):
         owner_rank = self.layer_id_to_rank[layer_id]
 
@@ -262,6 +319,7 @@ class AsyncPartitionedParameterSwapper(object):
             self.layer_id_to_path[layer_id] = param_path
         return param_path
 
+
     def _get_swap_buffers(self, params):
         buffers = []
         for param in params:
@@ -272,10 +330,12 @@ class AsyncPartitionedParameterSwapper(object):
 
         return buffers
 
+
     def _track_numel(self, params):
         for param in params:
             assert param.ds_tensor is not None, "Partitioned tensor is None"
             self.param_id_to_numel[param.ds_id] = param.ds_tensor.ds_numel
+
 
     def _allocate_and_return_buffers_for_swap_in(self, params):
         compute_buffers = []
@@ -289,21 +349,29 @@ class AsyncPartitionedParameterSwapper(object):
             assert param_id not in self.param_id_to_swap_buffer.keys(
             ), f"param {param_id} has already been assigned a swap buffer"
 
+
             buffer_id = self.available_buffer_ids.pop()
             print_rank_0(f"param {param.ds_id} is assigned swap in buffer id {buffer_id}  ")
             self.param_id_to_buffer_id[param_id] = buffer_id
+
             aligned_swap_numel = self._io_aligned_numel(self.param_id_to_numel[param_id])
+
 
             swap_buffer = self.buffers.narrow(0, int(buffer_id * self.aligned_elements_per_buffer), aligned_swap_numel)
 
             self.param_id_to_swap_buffer[param_id] = swap_buffer
+
+
             compute_buffer = swap_buffer.narrow(0, 0, self.param_id_to_numel[param_id])
             compute_buffers.append(compute_buffer)
             swap_buffers.append(swap_buffer)
 
         return compute_buffers, swap_buffers
 
+
     def _allocate_and_return_buffers_for_swap_in_2(self, layer_idx, param_idx):
+
+
         layer_start = self.pinned_buffer_information.get_layer_start_pos_in_buffers(layer_idx)
         layer_size = self.pinned_buffer_information.get_buffer_size()
         param_start = self.pinned_buffer_information.get_param_start_pos(param_idx)
@@ -315,7 +383,8 @@ class AsyncPartitionedParameterSwapper(object):
         swap_buffer = buffer.narrow(0, param_start, aligned_size)
 
         return compute_buffer, swap_buffer
-    
+
+
     def _allocate_and_return_buffers_for_param(self, layer_idx, param_idx):
         layer_start = self.pinned_buffer_information.get_layer_start_pos_in_buffers(layer_idx)
         layer_size = self.pinned_buffer_information.get_buffer_size()
@@ -338,13 +407,40 @@ class AsyncPartitionedParameterSwapper(object):
 
         return compute_buffer, swap_buffer
 
+
+    def _allocate_and_return_buffers_for_param_double_buffer(self, buffer_id, layer_idx, param_idx):
+        layer_start = self.pinned_buffer_information.get_layer_start_pos_in_buffers(buffer_id, layer_idx)
+        layer_size = self.pinned_buffer_information.get_layer_size()
+        param_start = self.pinned_buffer_information.get_param_start_pos(param_idx)
+        param_size = self.pinned_buffer_information.get_param_size(param_idx)
+        buffer = self.buffers.narrow(0, layer_start, layer_size)
+        compute_buffer = buffer.narrow(0, param_start, param_size)
+
+        return compute_buffer
+
+
+    def _return_buffer_for_transformer_layer_double_buffer(self, buffer_id, layer_idx):
+        layer_start = self.pinned_buffer_information.get_layer_start_pos_in_buffers(buffer_id, layer_idx)
+        aligned_layer_size = self.pinned_buffer_information.get_aligned_layer_size()
+        layer_size = self.pinned_buffer_information.get_layer_size()
+        swap_buffer = self.buffers.narrow(0, layer_start, aligned_layer_size)
+        compute_buffer = swap_buffer.narrow(0, 0, layer_size)
+
+        return compute_buffer, swap_buffer
+
     #waits for inflight nvme write to complete
+
+    # 2.
+
+
     def synchronize_writes(self):
         if self.pending_writes == 0:
             return
 
         assert self.pending_writes == self.aio_write_handle.wait()
         self.pending_writes = 0
+
+
         self.remove_partition_and_release_buffers(self.swap_out_params)
         self.swap_out_params = []
 
@@ -352,17 +448,24 @@ class AsyncPartitionedParameterSwapper(object):
     def synchronize_writes_without_release(self):
         if self.pending_writes == 0:
             return
+
         assert self.pending_writes == self.aio_write_handle.wait()
         self.pending_writes = 0
+        # self.swap_out_params = []
 
     #waits for inflight nvme reads to complete
+
+
     def synchronize_reads(self):
+
         if self.pending_reads == 0:
             return
 
         assert self.pending_reads == self.aio_read_handle.wait()
 
+
         self.pending_reads = 0
+
 
         for param, swap_in_buffer in zip(self.inflight_params, self.inflight_swap_in_buffers):
             param_id = param.ds_id
@@ -370,8 +473,10 @@ class AsyncPartitionedParameterSwapper(object):
             param.ds_tensor.data = compute_buffer.data
             param.ds_tensor.status = PartitionedParamStatus.AVAILABLE
 
+
         self.available_params.update([param.ds_id for param in self.inflight_params])
         self.available_numel += self.inflight_numel
+
 
         self.inflight_params = []
         self.inflight_swap_in_buffers = []
@@ -385,6 +490,8 @@ class AsyncPartitionedParameterSwapper(object):
 
     #Removes the memory assignment and releases the buffers
     #Should only be executed after swapping out the tensors
+
+
     def remove_partition_and_release_buffers(self, params):
         for param in params:
             param_id = param.ds_id
@@ -394,6 +501,7 @@ class AsyncPartitionedParameterSwapper(object):
                 buffer_id = self.param_id_to_buffer_id[param_id]
 
                 assert buffer_id is not None, "Missing buffer id for releasing"
+
 
                 self.available_buffer_ids.append(buffer_id)
 
@@ -411,50 +519,108 @@ class AsyncPartitionedParameterSwapper(object):
             param.ds_tensor.status = PartitionedParamStatus.NOT_AVAILABLE
 
     #writes from in memory to nvme. Does not release the buffers
-    # 
+    #
     def _swap_out(self, params, async_op=True):
 
         swap_out_paths = self._get_swap_paths(params)
+
+
         swap_out_params = self._get_swap_buffers(params)
         self._track_numel(params)
+
 
         swap_out_tensors(self.aio_write_handle, swap_out_params, swap_out_paths)
 
         self.pending_writes += len(swap_out_params)
         self.swap_out_params += params
 
+
         if not async_op:
+
+            # 2.
+
+
+            #     NOT_AVAILABLE
             self.synchronize_writes()
+
 
     def swap_out_2(self, param, layer_id, param_idx, async_op=False):
         swap_out_path = self._get_swap_paths_2(layer_id, param_idx)
+        print(f"rank:{self.rank}, 准备开始卸载layer{layer_id}", flush=True)
         swap_out_tensors(self.aio_write_handle, [param], [swap_out_path])
         self.pending_writes += 1
         # self.swap_out_params += param
         if not async_op:
+            print(f"rank:{self.rank}, layer{layer_id} 开始sync写入nvme", flush=True)
             self.synchronize_writes_without_release()
+            print(f"rank:{self.rank}, layer{layer_id}-{param_idx}卸载完成", flush=True)
 
     def swap_out_2_sync(self, param, layer_id, param_idx):
         swap_out_path = self._get_swap_paths_2(layer_id, param_idx)
         swap_out_tensors_sync(self.aio_write_handle, [param], [swap_out_path])
-        
+        print(f"rank:{self.rank}, layer{layer_id}-{param_idx}卸载完成", flush=True)
+
     def swap_out_2_sync_2(self, param, layer_id, param_idx):
         swap_out_path = self._get_swap_paths_2(layer_id, param_idx)
         swap_out_tensors_sync_2(self.aio_write_handle, [param], [swap_out_path])
+        print(f"rank:{self.rank}, layer{layer_id}-{param_idx}卸载完成", flush=True)
 
+    # 📍
     def swap_out_transformer_layer(self, layer_id, layer_idx, async_op=False):
+        # start_time = time.perf_counter()
         swap_out_path = self._get_transformer_layer_swap_paths(layer_id)
+        # end_time = time.perf_counter()
+
+        # start_time = time.perf_counter()
         _, swap_buffer = self._return_buffer_for_transformer_layer(layer_idx)
+        # end_time = time.perf_counter()
+
+
+        # start_time = time.perf_counter()
+        swap_out_tensors(self.aio_write_handle, [swap_buffer], [swap_out_path])
+        # end_time = time.perf_counter()
+
+        self.pending_writes += 1
+
+        # start_time = time.perf_counter()
+        # self.swap_out_params += swap_buffer
+        # end_time = time.perf_counter()
+
+        if not async_op:
+            # start_time = time.perf_counter()
+            print(f"rank:{self.rank}, layer{layer_id} 开始sync写入nvme", flush=True)
+            self.synchronize_writes_without_release()
+            # end_time = time.perf_counter()
+
+            print(f"rank:{self.rank}, layer{layer_id}卸载完成", flush=True)
+
+    # 📍
+    def swap_out_transformer_layer_sync(self, layer_id, layer_idx, async_op=False):
+        # start_time = time.perf_counter()
+        swap_out_path = self._get_transformer_layer_swap_paths(layer_id)
+        # end_time = time.perf_counter()
+
+        # start_time = time.perf_counter()
+        _, swap_buffer = self._return_buffer_for_transformer_layer(layer_idx)
+        # Persist updated parameters before the pinned slot is reused.
+        swap_out_tensors_sync_2(self.aio_write_handle, [swap_buffer], [swap_out_path])
+        print(f"rank:{self.rank}, layer{layer_id}卸载完成", flush=True)
+
+
+    def swap_out_transformer_layer_double_buffer(self, buffer_id, layer_id, layer_idx, async_op=False):
+        swap_out_path = self._get_transformer_layer_swap_paths(layer_id)
+        _, swap_buffer = self._return_buffer_for_transformer_layer_double_buffer(buffer_id, layer_idx)
         swap_out_tensors(self.aio_write_handle, [swap_buffer], [swap_out_path])
         self.pending_writes += 1
         if not async_op:
             self.synchronize_writes_without_release()
+            print(f"rank:{self.rank}, layer{layer_id}卸载完成", flush=True)
 
-    def swap_out_transformer_layer_sync(self, layer_id, layer_idx, async_op=False):
+
+    def swap_out_transformer_layer_double_buffer_sync(self, buffer_id, layer_id, layer_idx):
         swap_out_path = self._get_transformer_layer_swap_paths(layer_id)
-        _, swap_buffer = self._return_buffer_for_transformer_layer(layer_idx)
-        swap_in_tensors_sync_2(self.aio_write_handle, [swap_buffer], [swap_out_path])
-
+        _, swap_buffer = self._return_buffer_for_transformer_layer_double_buffer(buffer_id, layer_idx)
+        swap_out_tensors_sync_2(self.aio_write_handle, [swap_buffer], [swap_out_path])
 
     #blocking swap out followed by releasing the memory buffers
     def swap_out_and_release(self, params, async_op=False, force_buffer_release=False):
@@ -464,6 +630,11 @@ class AsyncPartitionedParameterSwapper(object):
 
 
     # book keeping function for inflight swap in
+
+
+    #
+
+
     def _update_inflight_swap_in(self, params, swap_in_buffers, inflight_numel):
         self.inflight_params.extend(params)
         self.inflight_swap_in_buffers.extend(swap_in_buffers)
@@ -474,6 +645,13 @@ class AsyncPartitionedParameterSwapper(object):
 
         self.pending_reads += len(params)
 
+    #assigns an in memory buffer and swaps in from nvme
+
+
+    #
+
+    # 5.
+
 
     def swap_in(self, params, async_op=True, swap_in_buffers=None):
 
@@ -481,6 +659,7 @@ class AsyncPartitionedParameterSwapper(object):
         assert all([param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE
                     for param in params]), "Some params are already available or in flight"
         swap_in_paths = self._get_swap_paths(params)
+
 
         if swap_in_buffers is None:
             if len(self.available_buffer_ids) < len(swap_in_paths):
@@ -498,22 +677,37 @@ class AsyncPartitionedParameterSwapper(object):
             assert len(swap_in_paths) <= len(
                 self.available_buffer_ids
             ), f"Not enough buffers {len(self.available_buffer_ids)} for swapping {len(swap_in_paths)}"
+
+
             compute_buffers, swap_in_buffers = self._allocate_and_return_buffers_for_swap_in(params)
+
             inflight_numel = sum([t.numel() for t in compute_buffers])
         else:
             inflight_numel = sum([t.numel() for t in swap_in_buffers])
 
+
         swap_in_tensors(self.aio_read_handle, swap_in_buffers, swap_in_paths)
+
+
+        #
+
 
         self._update_inflight_swap_in(params, swap_in_buffers, inflight_numel)
 
         if not async_op:
+
+
             self.synchronize_reads()
 
+
     def swap_in_2(self, layer_id, layer_idx, param_idx, async_op=True):
+        print(f"rank:{self.rank} 准备获取layer{layer_id}的文件路径", flush=True)
         swap_in_path = self._get_swap_paths_2(layer_id, param_idx)
+        print(f"rank:{self.rank} 想要读取的layer{layer_id}的文件路径为:{swap_in_path}", flush=True)
 
         compute_buffer, swap_in_buffer = self._allocate_and_return_buffers_for_swap_in_2(layer_idx, param_idx)
+        print(f"rank:{self.rank}, pinned buffer分配完成", flush=True)
+
         inflight_numel = compute_buffer.numel()
 
         swap_in_tensors(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
@@ -521,22 +715,33 @@ class AsyncPartitionedParameterSwapper(object):
 
         #
         if not async_op:
+            print(f"rank:{self.rank}, 开始sync读取", flush=True)
             self.synchronize_reads_2()
+            print(f"rank:{self.rank}, sync结束", flush=True)
+
 
     def swap_in_2_sync(self, layer_id, layer_idx, param_idx):
         swap_in_path = self._get_swap_paths_2(layer_id, param_idx)
         compute_buffer, swap_in_buffer = self._allocate_and_return_buffers_for_swap_in_2(layer_idx, param_idx)
         swap_in_tensors_sync(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
+        print(f"rank:{self.rank}, 同步读取{layer_id}-{param_idx}完成", flush=True)
+
 
     def swap_in_2_sync_2(self, layer_id, layer_idx, param_idx):
         swap_in_path = self._get_swap_paths_2(layer_id, param_idx)
         compute_buffer, swap_in_buffer = self._allocate_and_return_buffers_for_swap_in_2(layer_idx, param_idx)
         swap_in_tensors_sync_2(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
+        print(f"rank:{self.rank}, 同步读取{layer_id}-{param_idx}完成", flush=True)
 
+    # 📍2
     def swap_in_transformer_layer(self, layer_id, layer_idx, async_op=True):
+        print(f"rank:{self.rank} 准备获取layer{layer_id}的文件路径", flush=True)
         swap_in_path = self._get_transformer_layer_swap_paths(layer_id)
+        print(f"rank:{self.rank} 想要读取的layer{layer_id}的文件路径为:{swap_in_path}", flush=True)
 
         compute_buffer, swap_in_buffer = self._return_buffer_for_transformer_layer(layer_idx)
+        print(f"rank:{self.rank}, pinned buffer分配完成", flush=True)
+
         inflight_numel = compute_buffer.numel()
 
         swap_in_tensors(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
@@ -544,13 +749,55 @@ class AsyncPartitionedParameterSwapper(object):
 
         #
         if not async_op:
+            print(f"rank:{self.rank}, 开始sync读取", flush=True)
             self.synchronize_reads_2()
-    
+            print(f"rank:{self.rank}, sync结束", flush=True)
+
+
     def swap_in_transformer_layer_sync(self, layer_id, layer_idx):
         swap_in_path = self._get_transformer_layer_swap_paths(layer_id)
         compute_buffer, swap_in_buffer = self._return_buffer_for_transformer_layer(layer_idx)
         swap_in_tensors_sync_2(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
 
+        # global_param_idx = 0
+        # for m in self.pinned_buffer_information.transformer_layer.modules():
+        #     for key, param in m._parameters.items():
+        #         param_start = self.pinned_buffer_information.get_param_start_pos(global_param_idx)
+        #         param_size = self.pinned_buffer_information.get_param_size(global_param_idx)
+        #         target_shape = self.pinned_buffer_information.get_param_shape(global_param_idx)
+        #         restored_param = compute_buffer.narrow(0, param_start, param_size).view(*target_shape)
+        #         lines.append(
+        #             f"  [param] idx={global_param_idx}, name={key}, shape={target_shape}, "
+        #             f"dtype={restored_param.dtype}, value={restored_param}"
+        #         )
+        #         global_param_idx += 1
+        #     for key, buf in m._buffers.items():
+        #         buf_start = self.pinned_buffer_information.get_param_start_pos(global_param_idx)
+        #         buf_size = self.pinned_buffer_information.get_param_size(global_param_idx)
+        #         target_shape = self.pinned_buffer_information.get_param_shape(global_param_idx)
+        #         restored_buf = compute_buffer.narrow(0, buf_start, buf_size).view(*target_shape)
+        #         lines.append(
+        #             f"  [buffer] idx={global_param_idx}, name={key}, shape={target_shape}, "
+        #             f"dtype={restored_buf.dtype}, value={restored_buf}"
+        #         )
+        #         global_param_idx += 1
+        # print("\n".join(lines), flush=True)
+
+
+    def swap_in_transformer_layer_double_buffer(self, buffer_id, layer_id, layer_idx, async_op=True):
+        swap_in_path = self._get_transformer_layer_swap_paths(layer_id)
+        compute_buffer, swap_in_buffer = self._return_buffer_for_transformer_layer_double_buffer(buffer_id, layer_idx)
+        swap_in_tensors(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
+        self.pending_reads += 1
+
+        if not async_op:
+            self.synchronize_reads_2()
+
+
+    def swap_in_transformer_layer_double_buffer_sync(self, buffer_id, layer_id, layer_idx):
+        swap_in_path = self._get_transformer_layer_swap_paths(layer_id)
+        compute_buffer, swap_in_buffer = self._return_buffer_for_transformer_layer_double_buffer(buffer_id, layer_idx)
+        swap_in_tensors_sync_2(self.aio_read_handle, [swap_in_buffer], [swap_in_path])
 
     # Enables swapping into buffer that is out the control of swapper. This is always synchronous
     def swap_into_buffer(self, param, dest_buffer):
@@ -579,6 +826,8 @@ class AsyncPartitionedParameterSwapper(object):
             self.remove_partition_and_release_buffers([param])
 
     #assign a buffer to a param and return the buffer
+
+
     def get_buffer(self, param, numel):
         param_id = param.ds_id
 
@@ -594,7 +843,11 @@ class AsyncPartitionedParameterSwapper(object):
 
         aligned_swap_numel = self._io_aligned_numel(self.param_id_to_numel[param_id])
 
+        # narrow(dim, start, length)
+
+
         swap_buffer = self.buffers.narrow(0, int(buffer_id * self.aligned_elements_per_buffer), aligned_swap_numel)
+
 
         self.param_id_to_swap_buffer[param_id] = swap_buffer
 
@@ -602,6 +855,7 @@ class AsyncPartitionedParameterSwapper(object):
         print_rank_0(f"param {param.ds_id} is assigned swap in buffer id {buffer_id}")
         return compute_buffer
 
+    # 📍
     def get_buffer(self, layer_idx, param_idx):
         start_pos = self.pinned_buffer_information.get_layer_start_pos_in_buffers(layer_idx)
         buffer_size = self.pinned_buffer_information.get_buffer_size()
@@ -610,7 +864,6 @@ class AsyncPartitionedParameterSwapper(object):
         buffer = self.buffers.narrow(0, start_pos, buffer_size)
         compute_buffer = buffer.narrow(0, param_start_pos, param_size)
         return compute_buffer
-    
 
 
     def reserve_available_buffers(self):
@@ -631,6 +884,7 @@ class AsyncPartitionedParameterSwapper(object):
 
 
     def _io_aligned_numel(self, numel):
+
         remainder = numel % self.numel_alignment
         return numel if remainder == 0 else (numel + self.numel_alignment - remainder)
 
@@ -639,11 +893,14 @@ class AsyncPartitionedParameterSwapper(object):
 
 
     def reserve_partitioned_swap_space(self, partition_num_elems):
+
         aligned_numel = sum([self._io_aligned_numel(numel) for numel in partition_num_elems])
+
         self.partitioned_swap_buffer = get_accelerator().pin_memory(torch.zeros(aligned_numel,
                                                                                 device='cpu',
                                                                                 dtype=self.dtype),
                                                                     align_bytes=0)
+
         self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer])
 
 
@@ -659,7 +916,10 @@ class AsyncPartitionedParameterSwapper(object):
 
         self.partitioned_swap_pool.reset()
 
+
         for i, fp32_tensor in enumerate(src_fp32_params):
+
+
             swap_tensor, _ = self.partitioned_swap_pool.insert_tensor(fp32_tensor, fp16_swap_paths[i],
                                                                       self._io_aligned_numel(fp32_tensor.numel()))
             assert swap_tensor is not None
@@ -667,6 +927,7 @@ class AsyncPartitionedParameterSwapper(object):
 
 
         self.partitioned_swap_pool.swap_out(self.aio_write_handle)
+
 
         for param in dst_fp16_params:
             param.ds_tensor.status = PartitionedParamStatus.NOT_AVAILABLE

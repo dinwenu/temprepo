@@ -1,0 +1,153 @@
+% Artifact appendix aligned with the repository README.
+\section{Artifact Evaluation}
+\label{sec:artifact}
+
+\subsection{Overview and Access}
+
+The artifact provides SME and Harmony implementations for GPT-2
+training, including model configurations, generated layer code,
+profiles, four-GPU schedules, and Bash/Python experiment launchers.
+It supports comparison of memory consumption, throughput, and
+maximum trainable model size using pipeline parallelism (PP) and
+data parallelism (DP). Source code and the complete reproduction
+instructions are available at
+\url{https://github.com/dinwenu/temprepo}.
+The top-level README is the entry point for installation, dataset
+preparation, script selection, and expected results.
+
+\subsection{Artifact Checklist}
+
+\begin{itemize}
+  \item \textbf{Algorithm and programs:} Task-level parameter and
+  gradient memory management with layer-granularity NVMe parameter
+  swapping; SME and Harmony GPT-2 workloads.
+  \item \textbf{Models:} 1.5B, 2.6B, 5.9B, 8.0B, and 10.5B GPT-2
+  variants; sequence length 1024, FP32 precision, and activation
+  recomputation. Configurations and model code are included.
+  Pretrained weights are not bundled; default runs initialize
+  weights from the configurations.
+  \item \textbf{Data:} WikiText-103, downloaded separately from the
+  \texttt{wikitext-103-v1} subset of Salesforce's Hugging Face
+  repository. Downloads total approximately 313\,MB; restored text
+  totals approximately 542\,MB. The GPT-2 tokenizer is downloaded
+  separately on first use.
+  \item \textbf{Software:} Linux x86-64, Python
+  3.9.19, PyTorch 1.12.1, CUDA 11.3, and DeepSpeed 0.11.1; the paper
+  reports NCCL 2.10. Dependencies are specified in
+  \texttt{environment.yml}. A compatible NVIDIA driver, C++ and
+  CUDA compilers, Ninja, and libaio development files are required.
+  \item \textbf{Hardware and storage:} The reference server has
+  four RTX 3090 GPUs (24\,GB each), two 12-core Intel Xeon 4214R
+  CPUs, 256\,GB DRAM, a 2\,TB Samsung PM981 NVMe SSD, and PCIe
+  3.0$\times$16 GPU connections. At least \textbf{150\,GB of free
+  SSD space} is recommended.
+  \item \textbf{Execution and run-time state:} Run experiments
+  sequentially on four GPUs. Throughput averages exclude the first
+  half of completed iterations as warm-up. The 256\,GB capacity
+  experiment runs directly on the full-memory server; the 128\,GB
+  experiment uses NUMA binding or a collectively limited no-swap
+  cgroup.
+  \item \textbf{Metrics and output:} CPU/GPU memory usage, iteration
+  time, throughput (samples/s), training loss, and maximum trainable
+  model size. Console logs, loss arrays, and \path{command.json}
+  are produced. Capacity sweeps also save case logs,
+  \path{constraints.json}, and \path{summary.csv}.
+\end{itemize}
+
+\subsection{Installation, Data, and Basic Test}
+
+From the repository root, create the environment and configure a
+writable directory on the NVMe SSD:
+\begin{verbatim}
+conda env create -n sme -f environment.yml
+conda activate sme
+export SME_NVME_PATH=/path/on/nvme/sme
+mkdir -p "$SME_NVME_PATH"
+ulimit -n 51200
+\end{verbatim}
+The shell's hard limit must permit this open-file limit. Install
+libaio development files and set library/include paths as described
+in the README. DeepSpeed builds its I/O extension on first use;
+the custom swapper is imported from the repository, without copying
+files into the installed DeepSpeed package.
+
+Follow the README's download and conversion commands for
+\texttt{wikitext-103-v1} at the pinned Hugging Face revision
+specified there.
+Preserve row and shard order; restore each empty text row to one
+space followed by a newline, then concatenate and write UTF-8 bytes.
+Do not strip whitespace or add newlines to nonempty rows. The
+provided converter checks all three output files against the
+original experiment files' SHA256 values. The training file must be
+\path{data/wikitext-103-tokens/wiki.train.tokens}.
+
+All remaining commands below run from the launcher directory:
+\begin{verbatim}
+cd harmony/4_runtime/gpt2_huggingface
+bash run_gpt2_work5_2-6b.sh --check
+bash run_gpt2_work5_xl.sh --num-iters 2
+\end{verbatim}
+The input check prints that packaged inputs are present; it does
+not exercise training. The two-iteration test should initialize
+four ranks, print finite loss and positive throughput, finish with
+an average-throughput and memory summary, and exit successfully.
+
+\subsection{Experiments and Expected Results}
+
+\paragraph{Memory and throughput.}
+Standard schedules cover global minibatch sizes 16, 32, 64, 128,
+and 256. For example, run SME-DP with the 5.9B model:
+\begin{verbatim}
+bash run_gpt2_work5_5-9b.sh \
+  --schedule D32_vDP_N4_Top1 --num-iters 10
+\end{verbatim}
+Use \texttt{vPP} for PP. The corresponding Harmony launcher is
+\texttt{run\_gpt2\_5-9b.sh}; the README lists launchers for all five
+sizes. Each method should use matching model, data, schedule, and
+precision settings. Historical internal names such as
+\texttt{gpt2\_5b} identify serialized artifacts; public script names
+use the corrected sizes.
+
+Each iteration reports loss and throughput. Rank~0 prints
+\texttt{Avg Iter Time} and \texttt{Avg Throughput}; average
+throughput equals global minibatch size divided by the mean
+iteration duration after warm-up. Save console output with
+\texttt{tee}. The reported CPU \texttt{occupied} values are
+system-wide \texttt{total - available} snapshots; peak-memory
+comparisons require consistent sampling over the full execution.
+
+\paragraph{Maximum trainable model size (Section 4.2).}
+Verify the dedicated schedules and run the capacity sweeps:
+\begin{verbatim}
+python3 prepare_capacity_schedules.py --check
+bash run_section4_2_128gb.sh
+bash run_section4_2_256gb.sh
+\end{verbatim}
+These schedules use global minibatch size 4, four GPUs, forward
+and backward microbatch size 1, and one vLayer per pack. Each sweep
+covers SME/Harmony, five model sizes, and PP/DP, for 20 cases with
+four iterations per case. The 256\,GB sweep runs directly on the
+reference server. For 128\,GB, the default
+\texttt{--cpunodebind=0 --membind=0} is appropriate only when node~0
+has approximately 128\,GB; binding alone does not set a byte limit.
+The README describes node overrides and the cgroup alternative.
+Adding \texttt{--check} to a sweep inspects inputs and reports memory
+constraints without starting training.
+
+On the reference platform, the expected largest supported models
+for both PP and DP are:
+\begin{center}
+\begin{tabular}{lrr}
+\hline
+CPU memory & SME & Harmony \\
+\hline
+128\,GB & 5.9B & 1.5B \\
+256\,GB & 10.5B & 2.6B \\
+\hline
+\end{tabular}
+\end{center}
+SME should use less CPU memory for comparable workloads. Inspect
+case logs and completion/failure status in \texttt{summary.csv};
+record OOM separately from other failures. Absolute timing and
+throughput vary with hardware and system load. No numerical
+variation tolerance has been empirically established.

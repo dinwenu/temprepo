@@ -13,16 +13,14 @@ import psutil
 from psutil._common import bytes2human
 import gc
 import time
-
 import torch
 import torch.distributed as dist
-
 class NumaBinder(object):
     def __init__(self, config_path):
         os.path.exists(config_path)
         with open(config_path) as f:
             self.config = json.load(f)
-            # { rank0: [cpu#0, cpu#1] } 
+            # { rank0: [cpu#0, cpu#1] }
     def bind(self, process, rank):
         proc = psutil.Process(int(process.pid))
         assert str(rank) in self.config
@@ -33,7 +31,7 @@ class NumaBinder(object):
         assert result == self.config[str(rank)], \
               "numa binding failed: rank{} to cpu{} (vs config {})".format(rank, result, self.config[str(rank)])
         print("[Numa Binding] succeeded: rank{} to cpu{} ".format(rank, self.config[str(rank)]))
-       
+
 
 @torch.no_grad()
 def allreduce_cpu_loss(loss, averaging=True):
@@ -47,31 +45,55 @@ def allreduce_cpu_loss(loss, averaging=True):
         t /= float(dist.get_world_size())
     return t.item()
 
+
 def gather_integer(integer, rank, dst=0):
     assert isinstance(integer, int)
     t = torch.tensor(integer, dtype=torch.int64, device='cpu')
+
+
     if rank == dst:
-        gather_list = [ torch.tensor(0, dtype=torch.int64, device='cpu') 
-                                    for _ in range(dist.get_world_size()) ] 
+        gather_list = [ torch.tensor(0, dtype=torch.int64, device='cpu')
+                                    for _ in range(dist.get_world_size()) ]
     else:
         gather_list = None
+
+
     dist.gather(t, gather_list=gather_list, dst=dst)
+
     if rank == dst:
         return [t.item() for t in gather_list]
     else:
         return None
-    
+
 
 def load_model(src_state_dict, dst_model, verbose=False):
     """ Load state dict of baseline model into Harmony model
     (ref: https://pytorch.org/tutorials/beginner/saving_loading_models.html)
 
-    e.g. load_model(torch.load(os.path.join(path, "pytorch_model.bin")), model, verbose=True)  
+    e.g. load_model(torch.load(os.path.join(path, "pytorch_model.bin")), model, verbose=True)
     """
     assert isinstance(src_state_dict, ODict)
     assert isinstance(dst_model, list)
+
+    if True:
+        print(f"src_state_dict length: {len(src_state_dict)}")
+        print("src_state_dict keys:", list(src_state_dict.keys()))
+
+    def count_dst_model_params(dst_model):
+        """Count the number of parameters in dst_model."""
+        total_params = 0
+        for i, (vlayer, _, _) in enumerate(dst_model):
+            layer_params = len(vlayer.state_dict())
+            # print(f"Layer {i}: {layer_params} parameters")
+            total_params += layer_params
+        print(f"Total layers in dst_model: {total_params}")
+        return total_params
+    print(count_dst_model_params(dst_model))
+
     src_sdict_iter = iter(src_state_dict.items())
     for i, (vlayer, _, _) in enumerate(dst_model):
+        # if True:
+        #     print(f"Processing layer {i} with state_dict keys: {list(vlayer.state_dict().keys())}")
         new_state_dict = ODict()
         for key, val in vlayer.state_dict().items():
             try:
@@ -83,12 +105,14 @@ def load_model(src_state_dict, dst_model, verbose=False):
                 print(f"Warning: ran out of src_state_dict entries when processing {key} in layer {i}")
                 new_state_dict[key] = val
         vlayer.load_state_dict(new_state_dict)
+    dst_model[-2][0].layer1.lm_head.weight = dst_model[0][0].layer2.wte.weight
     if verbose: print("model loaded")
+
 
 def copy_model(src_model, dst_state_dict, verbose=False):
     """ in-place copy state dict of Harmony model to a baseline model.
 
-    e.g. state_dict = copy_model(model, torch.load(os.path.join(path, "pytorch_model.bin")), verbose=True)  
+    e.g. state_dict = copy_model(model, torch.load(os.path.join(path, "pytorch_model.bin")), verbose=True)
     """
     assert isinstance(src_model, list)
     assert isinstance(dst_state_dict, ODict)
@@ -101,31 +125,32 @@ def copy_model(src_model, dst_state_dict, verbose=False):
             dst_state_dict[dst_key] = val
     if verbose: print("model copied")
     return dst_state_dict
-        
+
+
 def save_model(state_dict, dir_orig, dir_save, white_list=['json','txt'], verbose=False):
     """ save state dict of baseline model to disk """
     os.makedirs(dir_save, exist_ok=True)
     torch.save(state_dict, os.path.join(dir_save, "pytorch_model.bin"))
     for fname in os.listdir(dir_orig):
         if fname.split('.')[-1] in white_list:
-            copyfile(src=os.path.join(dir_orig, fname), 
+            copyfile(src=os.path.join(dir_orig, fname),
                      dst=os.path.join(dir_save, fname))
     if verbose: print("saved model to {}".format(dir_save))
-    
+
 
 class CheckGPUMem(object):
     def __init__(self, rank):
         self.rank = rank
-        self.mem_stats_prev = torch.cuda.memory_stats(self.rank) 
+        self.mem_stats_prev = torch.cuda.memory_stats(self.rank)
 
     def check(self, it, is_check_retry=True, is_check_malloc=True):
         # check OoM & cudaFree
-        mem_stats = torch.cuda.memory_stats(self.rank) 
+        mem_stats = torch.cuda.memory_stats(self.rank)
         if is_check_retry and \
             mem_stats["num_alloc_retries"] != self.mem_stats_prev["num_alloc_retries"]:
             inc_retry = mem_stats["num_alloc_retries"] - \
                         self.mem_stats_prev["num_alloc_retries"] # num of failed cudaMalloc calls that result in a cache flush and retry.
-            print("rank%d: Warning!! @ it %d, memory allocation retried (%d times)"%(self.rank, it, inc_retry)) 
+            print("rank%d: Warning!! @ it %d, memory allocation retried (%d times)"%(self.rank, it, inc_retry))
         # check cudaMalloc
         if is_check_malloc and \
             mem_stats["segment.all.allocated"] != self.mem_stats_prev["segment.all.allocated"]:
@@ -141,7 +166,8 @@ def print_gpu_mem(rank, vt, description):
     print("\trank{}: task{}({}) {} with {}/{} MB".format(
             rank, vt.idx, vt.show_layers(), description,
             int(torch.cuda.memory_allocated(rank)/1024.0/1024.0),
-            int(torch.cuda.memory_reserved(rank)/1024.0/1024.0) ))  
+            int(torch.cuda.memory_reserved(rank)/1024.0/1024.0) ))
+
 
 def print_p2p_bytes(rank, p2px_handler, p2pm_handler, update_cnt):
     if p2px_handler is not None:
@@ -151,31 +177,32 @@ def print_p2p_bytes(rank, p2px_handler, p2pm_handler, update_cnt):
                 (rank, p2pout_bytes/1024./1024., p2pin_bytes/1024./1024.) )
     if p2pm_handler is not None:
         allreduce_bytes = p2pm_handler.allreduce_byte_cnt/float(update_cnt)
-        print("rank%d: AllReduce %.3f MB (per iter)"% 
+        print("rank%d: AllReduce %.3f MB (per iter)"%
                 (rank, allreduce_bytes/1024./1024.) )
+
 
 class PrintCPUMem(object):
     """ NOTE: use with caution. High overhead. """
-    def __init__(self, 
-                train_loop_choices=[], # ["process","system"], 
+    def __init__(self,
+                train_loop_choices=[], # ["process","system"],
                 the_rest_choices=["system"]): # ["tensor","process","system"]
         self.p = psutil.Process(None) # None means self pid
         self.train_loop_choices = train_loop_choices
         self.the_rest_choices = the_rest_choices
-        
+
     def tensor_cpu_memory(self):
         """ return current cpu tensors' total size, in current process """
-        total_bytes = sum([obj.numel()*obj.element_size() for obj in gc.get_objects() 
+        total_bytes = sum([obj.numel()*obj.element_size() for obj in gc.get_objects()
                             if isinstance(obj, torch.Tensor) and not obj.is_cuda])
         return "cpu tensor %s"%bytes2human(total_bytes) # bytes int, return string
 
     def process_cpu_memory(self, metrics=["uss", "pss", "vms", "shared"]):
-        """ 
+        """
         return current process-level cpu memory usage as a string:
         e.g. 'Uss 174.8M, Pss 175.8M, Rss 176.5M, Vms 3.4G, Shared 104.6M, Swap 0.0B'
-        
+
         memory_full_info():
-        - rss: aka “Resident Set Size”, this is the non-swapped physical memory a process has used. On UNIX it matches “top“‘s RES column). 
+        - rss: aka “Resident Set Size”, this is the non-swapped physical memory a process has used. On UNIX it matches “top“‘s RES column).
         - vms: aka “Virtual Memory Size”, this is the total amount of virtual memory used by the process. On UNIX it matches “top“‘s VIRT column.
         - shared: memory that could be potentially shared with other processes. This matches “top“‘s SHR column).
         - text: aka TRS (text resident set) the amount of memory devoted to executable code. This matches “top“‘s CODE column).
@@ -195,11 +222,12 @@ class PrintCPUMem(object):
             ps.append('%s %s'%(name.capitalize(),value))
         return ', '.join(ps)
 
+
     def system_cpu_memory(self, metrics=["used", "shared", "available", "swap", "occupied"]):
-        """ 
+        """
         return current system-level cpu memory usage as a string:
         e.g. 'Used 3.3G, Active 23.6G, Shared 2.7M, Available 746.5G, Swap 0.0B'
-        
+
         psutil.virtual_memory():
         - total: total physical memory (exclusive swap).
         - available: the memory that can be given instantly to processes without the system going into swap.
@@ -223,15 +251,20 @@ class PrintCPUMem(object):
         named_tuple2 = psutil.swap_memory() # sswap(total=1023406080, used=0, free=1023406080, percent=0.0, sin=0, sout=0)
         ps = []
         for name in metrics:
+
+
             if name == "swap":
                 value = getattr(named_tuple2, 'used')
             elif name == "occupied":
+
                 value = getattr(named_tuple, 'total') - getattr(named_tuple, 'available')
             else:
                 value = getattr(named_tuple, name)
             #
+
             if name != 'percent':
                 value = bytes2human(value)
+
             ps.append('%s %s'%(name.capitalize(),value))
         return ', '.join(ps)
 
@@ -248,11 +281,3 @@ class PrintCPUMem(object):
             elif c == "system":
                 ps.append(self.system_cpu_memory())
         print(" | ".join(ps))
-        # print(title, "|", tensor_cpu_memory(), "|", process_cpu_memory(metrics=["uss", "pss", "vms", "shared", "swap"]), "|", system_cpu_memory(metrics=["used", "shared", "available", "swap"]))
-
-# def dump(obj, path):
-#     if ".pickle" not in path:
-#         path += ".pickle"
-#     with open(path, 'wb') as f:
-#         # pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
-#         torch.save(obj, f)

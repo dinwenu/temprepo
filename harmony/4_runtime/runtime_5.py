@@ -28,40 +28,48 @@ def _assert_assumption(CONFIGS):
     if CONFIGS['mode'] == 'vPP':
         assert len(set(CONFIGS['ubatchszs_fwd'])) == 1
         assert len(set(CONFIGS['ubatchszs_bwd'])) == 1
-    elif CONFIGS['mode'] == 'vDP': 
+    elif CONFIGS['mode'] == 'vDP':
         for ubatchszs_fwd, ubatchszs_bwd in zip(CONFIGS['ubatchszs_fwd'], CONFIGS['ubatchszs_bwd']):
             assert len(set(ubatchszs_fwd)) == 1
             assert len(set(ubatchszs_bwd)) == 1
     else:
         raise ValueError
     # a single BWD task should have equal ubatchszs_fwd and ubatchszs_bwd per GPU
-    if CONFIGS["pack_fwd"] == []: 
+    if CONFIGS["pack_fwd"] == []:
         assert CONFIGS["u_fwd"] == CONFIGS["u_bwd"]
         if CONFIGS['mode'] == 'vPP':
             assert CONFIGS['ubatchszs_fwd'] == CONFIGS['ubatchszs_bwd']
-        elif CONFIGS['mode'] == 'vDP': 
+        elif CONFIGS['mode'] == 'vDP':
             for ubatchszs_fwd, ubatchszs_bwd in zip(CONFIGS['ubatchszs_fwd'], CONFIGS['ubatchszs_bwd']):
                 assert ubatchszs_fwd == ubatchszs_bwd
         else:
             raise ValueError
 
 def worker_func(*pargs, **kwargs): # per process
+
+
     from worker_5_layer import Worker
     w = Worker(*pargs, **kwargs)
     # w.run_initial_iteration()
     w.run_training_loop()
     w.finish()
-        
+
 def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None, get_lr_sched=None, compute_loss=None, save_model=None): # main process
-        
     import seeding
     seeding.seed(args.seed, args.seed_cudnn)
-    
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     """ Initialize Harmony. """
+
     module_path = os.path.join(args.module_dir, args.module_name)
     assert os.path.exists(module_path)
     assert os.path.basename(module_path) not in ["prof", "sched"], "no base_dir in module_path"
-    
+
     # read profiles
     from prof_data_struct import ConstMeta, TensorMeta, XMeta, TMeta, load_prof_data_struct
     prof = ODict()
@@ -69,15 +77,18 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
     # ['prof_XMETA', 'prof_TMETA']
     for name in args.profile_fnames:
         key = name.split("prof_")[-1]
+
         prof[key] = load_prof_data_struct(module_path, name + args.suffix, base_dir="my_prof", verbose=True)
-    
+
     # read schedule
     from task_data_struct import Medium, vTask, unserialize_scheduled
+
     if args.schedule_dir == "":
         args.schedule_dir = module_path
+
     rTASKS, CONFIGS = unserialize_scheduled(args.schedule_dir, args.schedule_fname + args.suffix, base_dir="my_sched", verbose=False)
     _assert_assumption(CONFIGS)
-    
+
     """ Initialize data. """
     if args.synthetic_data:
         args.num_epochs = 1
@@ -88,16 +99,21 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
         print("  num iterations per epoch = %d" % (args.num_iters))
         print("  num optimization steps = %d" % (args.num_train_steps))
 
+
     else:
+
         data_loader, examples, _, _, _, _, _ = real_dataset(args, CONFIGS["D"], data_workers=0)
         print(f"........len(data_loader):{len(data_loader)}")
         if get_train_steps is not None: # "bert_thomwolf"
             args.num_train_steps = get_train_steps(args, examples, CONFIGS["D"])
         else:
+
             args.num_train_steps = len(data_loader) * args.num_epochs
+
         if args.num_iters is None:
             args.num_iters = len(data_loader) # num_minibatch
         else:
+
             args.num_iters = min(args.num_iters, len(data_loader))
         print('----- Training Info -----')
         print("  num epoches = %d" % args.num_epochs)
@@ -105,7 +121,8 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
         print("  num iterations per epoch = %d" % (args.num_iters))
         print("  num optimization steps = %d" % (args.num_train_steps))
         del data_loader
-    
+
+
     if args.nvprof:
         assert args.num_epochs == 1, "num_epochs must be 1 during nvprof"
         if args.nvprof_iter == "first":
@@ -113,7 +130,7 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
         elif args.nvprof_iter == "last":
             args.nvprof_iter = { "start" : args.num_iters - 1, "end" : args.num_iters - 1 }
         elif args.nvprof_iter == "all":
-            args.nvprof_iter = { "start" : 0, "end" : args.num_iters - 1 } 
+            args.nvprof_iter = { "start" : 0, "end" : args.num_iters - 1 }
         else:
             raise ValueError
 
@@ -121,51 +138,75 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
     from utils import PrintCPUMem
     pcm = PrintCPUMem()
     pcm.print("before creating model")
+
     model = create_model(args)
     pcm.print("model created")
+
 
     for vlayer, _, _ in model:
         if len(list(vlayer.parameters())) != 0:
             for param in vlayer.parameters():
+
                 assert not param.is_cuda
-    
+
     # initialize empty model on CPU
+
+
     from local_model_gpu import delete_param_grad_buf
     empty_model = []
     for vlayer, _, _ in model:
         with torch.no_grad():
             vlayer_copy = deepcopy(vlayer)
+
         delete_param_grad_buf(vlayer_copy)
         empty_model.append(vlayer_copy)
-    
-    # initialize shared model on CPU  
+
+    # initialize shared model on CPU
+
     for vlayer, _1, _2 in model:
+        print("vlayer的类型是", type(vlayer),", 类名是:", vlayer.__class__.__name__)
         print(_1,_2)
-        vlayer.share_memory() # move parameter into shared memory    
+        vlayer.share_memory() # move parameter into shared memory
     pcm.print("shared model created")
 
     """ Initialize optimizer. """
+
     optimizer = create_optimizer(args, model)
+    # print(optimizer)
+
     pcm.print("optimizer created")
-    
+
+
+    for i, param_group in enumerate(optimizer[0].param_groups):
+        print(f"参数组{i}:")
+        print(f"param_group[{i}].keys(): {param_group.keys()}")
+        print(f"param_group[{i}].values(): {param_group.values()}")
+
     # initialize shared optimizer on CPU
     from shared_optim_cpu import SharedOptimCPU_for_worker5
     shared_model = model # model is already shared
     shared_optimizer = [] # wrapper object for optimizer
-    for id, ((vlayer, _, _), optim) in enumerate(zip(shared_model, optimizer)): 
+
+    for id, ((vlayer, _, _), optim) in enumerate(zip(shared_model, optimizer)):
+
+
         shared_optimizer.append(SharedOptimCPU_for_worker5(vlayer, optim, id))
     pcm.print("shared optimizer created")
 
-    """ Initialize distributed training. """ 
-    gc.collect(); torch.cuda.empty_cache() 
-    assert torch.cuda.memory_reserved() == 0, "fork process begins w/ alloc = {} B".format(torch.cuda.memory_reserved()) 
-    
+    """ Initialize distributed training. """
+    gc.collect(); torch.cuda.empty_cache()
+    assert torch.cuda.memory_reserved() == 0, "fork process begins w/ alloc = {} B".format(torch.cuda.memory_reserved())
+
     processes = []
+
+
+    print(f"是否使用参数 arg.numa_bind:{args.numa_bind}")
     if args.numa_bind:
         from utils import NumaBinder
         numa_binder = NumaBinder(args.numa_bind_config)
     for rank in range(CONFIGS["N"]):
-        p = mp.Process(target=worker_func, 
+
+        p = mp.Process(target=worker_func,
                         args=(args, real_dataset, shared_model, shared_optimizer, empty_model, get_lr_sched, compute_loss, save_model, prof['XMETA'], prof['TMETA'], rTASKS, CONFIGS, rank),
                         name="rank%d"%rank)
         # NOTE: this moves parameter from pinned memory to shared memory
@@ -173,10 +214,10 @@ def run(args, real_dataset, create_model, create_optimizer, get_train_steps=None
         processes.append(p)
         if args.numa_bind:
             numa_binder.bind(p, rank)
-        
+
     if args.nvprof:
         from viewer.probe_cpu import ProbeCPU
-        probe_cpu = ProbeCPU(pids=[p.pid for p in processes], 
+        probe_cpu = ProbeCPU(pids=[p.pid for p in processes],
                             ranks=[rank for rank in range(CONFIGS["N"])])
         probe_cpu.run(processes[0])
         print("--- rank -1: Done ---")
